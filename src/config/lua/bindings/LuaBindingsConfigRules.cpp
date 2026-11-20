@@ -21,6 +21,11 @@
 #include "../../shared/workspace/WorkspaceRuleManager.hpp"
 
 #include "../../../desktop/rule/Engine.hpp"
+#include "../../../desktop/state/WindowState.hpp"
+#include "../../../desktop/view/window/WindowPresentation.hpp"
+#include "../../../desktop/rule/windowRule/WindowRuleApplicator.hpp"
+#include "../../../managers/eventLoop/EventLoopManager.hpp"
+#include "../../../render/Renderer.hpp"
 #include "../../../desktop/rule/layerRule/LayerRule.hpp"
 #include "../../../desktop/rule/layerRule/LayerRuleEffectContainer.hpp"
 #include "../../../desktop/rule/windowRule/WindowRule.hpp"
@@ -1193,9 +1198,18 @@ static int hlWindowRule(lua_State* L) {
         enabled = lua_toboolean(L, -1) != 0;
     lua_pop(L, 1);
 
+    std::vector<PHLWINDOWREF> affected;
+    const auto remember = [&](const SP<Desktop::Rule::CWindowRule>& changed) {
+        for (const auto& w : Desktop::windowState()->windows()) {
+            if (validMapped(w) && !w->isHidden() && changed->matches(w) &&
+                std::ranges::none_of(affected, [&](const auto& existing) { return existing == w; }))
+                affected.emplace_back(w);
+        }
+    };
     SP<Desktop::Rule::CWindowRule> rule;
     if (!name.empty() && self->m_luaWindowRules.contains(name)) {
         rule = self->m_luaWindowRules[name];
+        remember(rule);
     } else {
         rule = makeShared<Desktop::Rule::CWindowRule>(name);
         if (!name.empty())
@@ -1275,7 +1289,20 @@ static int hlWindowRule(lua_State* L) {
         lua_pop(L, 1);
     }
 
-    Supplementary::refresher()->scheduleRefresh(Supplementary::REFRESH_WINDOW_STATES);
+    remember(rule);
+    if (!affected.empty() && g_pEventLoopManager) {
+        // A popup rule must not renegotiate unrelated windows or their workspaces.
+        g_pEventLoopManager->doLater([affected = std::move(affected)] {
+            for (const auto& weak : affected) {
+                const auto w = weak.lock();
+                if (!validMapped(w) || w->isHidden())
+                    continue;
+                w->presentation().uncacheDecorations();
+                w->m_ruleApplicator->propertiesChanged(Desktop::Rule::RULE_PROP_ALL);
+                g_pHyprRenderer->damageWindow(w);
+            }
+        });
+    }
 
     Objects::CLuaWindowRule::push(L, rule);
     return 1;
