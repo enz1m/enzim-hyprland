@@ -303,6 +303,8 @@ endif()
 
 add_library(hyprland_lib STATIC ${SRCFILES})
 add_executable(Hyprland src/main.cpp ${TRACY_CPP_FILES})
+# enzUI: its compositor is enz-hyprland, so it is not mistaken for Hyprland itself.
+set_target_properties(Hyprland PROPERTIES OUTPUT_NAME enz-hyprland)
 target_link_libraries(Hyprland hyprland_lib)
 
 target_include_directories(hyprland_lib PUBLIC ${deps_INCLUDE_DIRS} ${LUA_INCLUDE_DIRS})
