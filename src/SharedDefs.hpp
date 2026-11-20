@@ -27,6 +27,7 @@ enum eRenderStage : uint8_t {
     RENDER_POST_MIRROR,    /* After rendering a mirror */
     RENDER_PRE_WINDOW,     /* Before rendering a window (any pass) Note some windows (e.g. tiled) may have 2 passes (main & popup) */
     RENDER_POST_WINDOW,    /* After rendering a window (any pass) */
+    RENDER_POST_TOP_LAYERS, /* After the top layers, before the overlay layers */
 };
 
 enum eInputType : uint8_t {

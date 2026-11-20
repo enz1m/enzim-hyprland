@@ -1239,6 +1239,8 @@ void IHyprRenderer::renderAllClientsForWorkspace(PHLMONITOR pMonitor, PHLWORKSPA
     }
     renderFadeouts(pMonitor, Desktop::FADEOUT_PLANE_LAYER_TOP);
 
+    Event::bus()->m_events.render.stage.emit(RENDER_POST_TOP_LAYERS);
+
     for (auto const& ls : pMonitor->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY]) {
         renderLayer(ls.lock(), pMonitor, time);
     }
