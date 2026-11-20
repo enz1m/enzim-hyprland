@@ -8,6 +8,8 @@
 #include "../desktop/view/View.hpp"
 #include "../desktop/view/types/AlphaModifiable.hpp"
 #include "../render/Renderer.hpp"
+#include "../Compositor.hpp"
+#include "../managers/eventLoop/EventLoopManager.hpp"
 #include <algorithm>
 #include <hyprutils/memory/WeakPtr.hpp>
 
@@ -32,6 +34,20 @@
  * Ugly as this is, Mesa relies on the same behavior, so it's
  * probably safe to treat this as the "intended" behavior.
 */
+
+// enzUI: whether a monitor showing `surface` will present again. None will
+// while the session is inactive (another VT, a switched-away user) or while
+// the monitor is off or disabled, as when a locked desktop blanks it.
+static bool presentationExpected(const SP<CWLSurfaceResource>& surface) {
+    if (!g_pCompositor->m_sessionActive || (g_pCompositor->m_aqBackend->hasSession() && !g_pCompositor->m_aqBackend->session->active))
+        return false;
+
+    const auto presents = [](const auto& m) { return m && m->m_enabled && m->m_dpmsStatus; };
+    if (surface->m_enteredOutputs.empty())
+        return std::ranges::any_of(State::monitorState()->monitors(), presents);
+
+    return std::ranges::any_of(surface->m_enteredOutputs, presents);
+}
 
 CFifoResource::CFifoResource(UP<CWpFifoV1>&& resource_, SP<CWLSurfaceResource> surface) : m_resource(std::move(resource_)), m_surface(surface) {
     if UNLIKELY (!m_resource->resource())
@@ -79,6 +95,21 @@ CFifoResource::CFifoResource(UP<CWpFifoV1>&& resource_, SP<CWLSurfaceResource> s
         // check if entered outputs yet, and they are not tearing.
         if (!checkMonitors())
             return;
+
+        // enzUI: a barrier waits for the next presentation. Without one coming,
+        // it would hold this commit, and every later one with its buffer,
+        // until presentation resumes; Mesa's FIFO presentation keeps
+        // committing behind such barriers. wp_fifo_v1 must unblock in finite
+        // time: apply instead, and release a barrier taken before presentation
+        // stopped, one per commit. Later, as this commit's fence lock is not
+        // taken yet.
+        if (!presentationExpected(m_surface.lock())) {
+            g_pEventLoopManager->doLater([surface = m_surface] {
+                if (surface && surface->m_fifo)
+                    surface->m_fifo->presented();
+            });
+            return;
+        }
 
         // only lock once its mapped and visible and actually has something waiting for a presentation.
         if (m_surface->m_mapped && m_surface->m_current.waitingOnPresentation) {
