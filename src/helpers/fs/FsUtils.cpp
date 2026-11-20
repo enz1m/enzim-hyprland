@@ -10,6 +10,17 @@
 using namespace Hyprutils::String;
 
 std::optional<std::string> NFsUtils::getDataHome() {
+    // enzUI: its compositor keeps its state apart from a Hyprland the user also runs.
+    if (const auto ENZUI_HOME = getenv("ENZUI_HYPR_DATA_HOME"); ENZUI_HOME && ENZUI_HOME[0] == '/') {
+        std::error_code ec;
+        std::filesystem::create_directories(ENZUI_HOME, ec);
+        if (ec) {
+            LOG(Log::ERR, "FsUtils::getDataHome: can't create the enzUI compositor data home");
+            return std::nullopt;
+        }
+        return std::string{ENZUI_HOME} + "/";
+    }
+
     const auto  DATA_HOME = getenv("XDG_DATA_HOME");
 
     std::string dataRoot;

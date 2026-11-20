@@ -969,8 +969,12 @@ void CCompositor::openSafeModeBox() {
             std::string reportPath;
             const auto  HOME       = getenv("HOME");
             const auto  CACHE_HOME = getenv("XDG_CACHE_HOME");
+            const auto  ENZUI_CACHE = getenv("ENZUI_HYPR_CACHE_HOME");
 
-            if (CACHE_HOME && CACHE_HOME[0] != '\0') {
+            if (ENZUI_CACHE && ENZUI_CACHE[0] == '/') {
+                reportPath += ENZUI_CACHE;
+                reportPath += "/";
+            } else if (CACHE_HOME && CACHE_HOME[0] != '\0') {
                 reportPath += CACHE_HOME;
                 reportPath += "/hyprland/";
             } else if (HOME && HOME[0] != '\0') {

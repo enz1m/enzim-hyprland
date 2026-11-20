@@ -61,8 +61,12 @@ void CrashReporter::createAndSaveCrash(int sig) {
 
         const auto                         HOME       = SignalSafe::getenv("HOME");
         const auto                         CACHE_HOME = SignalSafe::getenv("XDG_CACHE_HOME");
+        // enzUI: its compositor's reports stay apart from a Hyprland the user also runs.
+        const auto                         ENZUI_CACHE = SignalSafe::getenv("ENZUI_HYPR_CACHE_HOME");
 
-        if (CACHE_HOME && CACHE_HOME[0] != '\0') {
+        if (ENZUI_CACHE && ENZUI_CACHE[0] == '/') {
+            reportPath += ENZUI_CACHE;
+        } else if (CACHE_HOME && CACHE_HOME[0] != '\0') {
             reportPath += CACHE_HOME;
             reportPath += "/hyprland";
         } else if (HOME && HOME[0] != '\0') {
