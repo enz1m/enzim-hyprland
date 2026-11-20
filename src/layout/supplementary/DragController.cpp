@@ -24,6 +24,8 @@
 using namespace Layout;
 using namespace Layout::Supplementary;
 
+static PHLWINDOWREF s_maximizedRestoreWindow;
+
 static bool isResizeMode(eMouseBindMode mode) {
     return mode == MBIND_RESIZE || mode == MBIND_RESIZE_FORCE_RATIO || mode == MBIND_RESIZE_BLOCK_RATIO;
 }
@@ -114,6 +116,9 @@ bool CDragStateController::updateDragWindow() {
     if (m_dragThresholdReached) {
         if (WAS_FULLSCREEN) {
             LOG(Log::DEBUG, "Dragging a fullscreen window");
+            if (m_dragMode == MBIND_MOVE && DRAGGINGTARGET->floating() &&
+                Fullscreen::controller()->getFullscreenModes(DRAGGINGTARGET->window()).internal == Fullscreen::FSMODE_MAXIMIZED)
+                s_maximizedRestoreWindow = DRAGGINGTARGET->window();
             Fullscreen::controller()->setFullscreenMode(DRAGGINGTARGET->window(), Fullscreen::FSMODE_NONE);
         }
 
@@ -157,6 +162,7 @@ bool CDragStateController::updateDragWindow() {
 }
 
 void CDragStateController::dragBegin(SP<ITarget> target, eMouseBindMode mode, std::optional<eRectCorner> forcedEdge, bool exclusiveDeviceGrab) {
+    s_maximizedRestoreWindow.reset();
     m_target              = target;
     m_dragMode            = mode;
     m_draggingTiled       = false;
@@ -250,6 +256,7 @@ void CDragStateController::dragBegin(SP<ITarget> target, eMouseBindMode mode, st
         setClientResizingState(DRAGGINGTARGET, true);
 }
 bool CDragStateController::dragEnd() {
+    s_maximizedRestoreWindow.reset();
     auto draggingTarget = m_target.lock();
 
     if (!draggingTarget)
@@ -409,7 +416,18 @@ void CDragStateController::mouseMove(const Vector2D& mousePos) {
         newPos = newPos.round();
 
         DRAGGINGTARGET->setPositionGlobal({newPos, newSize});
-        DRAGGINGTARGET->warpPositionSize();
+        const auto RESTORE = s_maximizedRestoreWindow.lock();
+        if (RESTORE && RESTORE == DRAGGINGTARGET->window() && RESTORE->sizeAnimation()->isBeingAnimated()) {
+            const auto GOALSIZE = RESTORE->sizeAnimation()->goal();
+            const auto CURRENT  = RESTORE->sizeAnimation()->value();
+            if (GOALSIZE.x > 0 && GOALSIZE.y > 0) {
+                const auto FRACTION = Vector2D{m_dragHotspot.x / GOALSIZE.x, m_dragHotspot.y / GOALSIZE.y}.clamp(Vector2D{0.F, 0.F}, Vector2D{1.F, 1.F});
+                RESTORE->positionAnimation()->setValue(mousePos - FRACTION * CURRENT);
+            } else
+                DRAGGINGTARGET->warpPositionSize();
+        } else {
+            DRAGGINGTARGET->warpPositionSize();
+        }
     } else if (isResizeMode(m_dragMode)) {
         if (DRAGGINGTARGET->floating()) {
 
