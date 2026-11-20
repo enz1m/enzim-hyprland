@@ -364,6 +364,9 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
         PROTO::subcompositor->getGlobal(),
         PROTO::shm->getGlobal(),
         PROTO::viewport->getGlobal(),
+        // Output names, logical positions and sizes: what wl_output already
+        // tells a sandboxed client, in the form toolkits use for scaling.
+        PROTO::xdgOutput->getGlobal(),
         PROTO::tearing->getGlobal(),
         PROTO::fractional->getGlobal(),
         PROTO::cursorShape->getGlobal(),
