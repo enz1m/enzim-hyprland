@@ -586,8 +586,13 @@ void CSeatManager::sendTouchFrame() {
 }
 
 void CSeatManager::sendTouchCancel() {
-    if (!m_state.touchFocusResource)
+    if (!m_state.touchFocusResource) {
+        m_listeners.touchSurfaceDestroy.reset();
+        m_state.touchFocus.reset();
+        m_touchLocks = 0;
+        m_events.touchFocusChange.emit();
         return;
+    }
 
     for (auto const& s : m_seatResources) {
         if (s->resource->client() != m_state.touchFocusResource->client())
@@ -600,6 +605,12 @@ void CSeatManager::sendTouchCancel() {
             t->sendCancel();
         }
     }
+
+    m_listeners.touchSurfaceDestroy.reset();
+    m_state.touchFocus.reset();
+    m_state.touchFocusResource.reset();
+    m_touchLocks = 0;
+    m_events.touchFocusChange.emit();
 }
 
 void CSeatManager::sendTouchShape(int32_t id, const Vector2D& shape) {

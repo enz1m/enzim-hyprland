@@ -101,6 +101,7 @@ class CInputManager {
     void               newMouse(SP<IPointer>);
     void               newMouse(SP<Aquamarine::IPointer>);
     void               newVirtualMouse(SP<CVirtualPointerV1Resource>);
+    void               newTouchDevice(SP<ITouch>);
     void               newTouchDevice(SP<Aquamarine::ITouch>);
     void               newSwitch(SP<Aquamarine::ISwitch>);
     void               newTabletPad(SP<Aquamarine::ITabletPad>);

@@ -55,6 +55,7 @@
 #include "config/ConfigManager.hpp"
 #include "render/OpenGL.hpp"
 #include "managers/input/InputManager.hpp"
+#include "managers/input/EISInputManager.hpp"
 #include "animation/AnimationManager.hpp"
 #include "ipc/s2/S2.hpp"
 #include "managers/ProtocolManager.hpp"
@@ -609,6 +610,7 @@ void CCompositor::cleanup() {
 
     removeAllSignals();
 
+    g_pEISInputManager.reset();
     g_pInputManager.reset();
     g_pDynamicPermissionManager.reset();
     g_pDecorationPositioner.reset();
@@ -730,6 +732,9 @@ void CCompositor::initManagers(eManagersInitStage stage) {
 
             LOG(Log::DEBUG, "Creating the InputManager!");
             g_pInputManager = makeUnique<CInputManager>();
+
+            LOG(Log::DEBUG, "Creating the EISInputManager!");
+            g_pEISInputManager = makeUnique<CEISInputManager>();
 
             LOG(Log::DEBUG, "Creating the XWaylandManager!");
             g_pXWaylandManager = makeUnique<CHyprXWaylandManager>();

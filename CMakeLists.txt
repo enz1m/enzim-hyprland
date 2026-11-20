@@ -278,7 +278,7 @@ pkg_check_modules(deps
   xcursor
   libdrm
   libinput>=${LIBINPUT_MINIMUM_VERSION}
-  libeis-1.0
+  libeis-1.0>=1.2
   gbm
   gio-2.0
   re2
