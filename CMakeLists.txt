@@ -278,7 +278,7 @@ pkg_check_modules(deps
   xcursor
   libdrm
   libinput>=${LIBINPUT_MINIMUM_VERSION}
-  libeis-1.0
+  libeis-1.0>=1.2
   gbm
   gio-2.0
   re2
@@ -302,6 +302,12 @@ if(USE_TRACY)
 endif()
 
 add_library(hyprland_lib STATIC ${SRCFILES})
+set(ENZREMOTE_SOURCE_DIR "" CACHE PATH "enzUI shared-desktop implementation")
+if(NOT EXISTS "${ENZREMOTE_SOURCE_DIR}/RemoteDesktop.hpp")
+  message(FATAL_ERROR "ENZREMOTE_SOURCE_DIR must point to the companion's compositor sources")
+endif()
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/protocols/enzremote-shared.hpp" "#include \"${ENZREMOTE_SOURCE_DIR}/RemoteDesktop.hpp\"\n")
+target_sources(hyprland_lib PRIVATE "${ENZREMOTE_SOURCE_DIR}/RemoteSeat.cpp" "${ENZREMOTE_SOURCE_DIR}/RemoteDesktop.cpp" "${ENZREMOTE_SOURCE_DIR}/DesktopLease.cpp")
 add_executable(Hyprland src/main.cpp ${TRACY_CPP_FILES})
 target_link_libraries(Hyprland hyprland_lib)
 

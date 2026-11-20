@@ -1242,7 +1242,7 @@ void CInputManager::applyConfigToKeyboard(SP<IKeyboard> pKeyboard) {
 
     pKeyboard->m_enabled           = ENABLED;
     pKeyboard->m_resolveBindsBySym = RESOLVEBINDSBYSYM;
-    pKeyboard->m_allowBinds        = ALLOWBINDS;
+    pKeyboard->m_allowBinds        = ALLOWBINDS && !pKeyboard->m_forcedNoBinds;
 
     const auto PERM = g_pDynamicPermissionManager->clientPermissionModeWithString(-1, pKeyboard->m_hlName, PERMISSION_TYPE_KEYBOARD);
 
@@ -2029,7 +2029,11 @@ void CInputManager::disableAllKeyboards(bool virt) {
 }
 
 void CInputManager::newTouchDevice(SP<Aquamarine::ITouch> pDevice) {
-    const auto PNEWDEV = m_touches.emplace_back(CTouchDevice::create(pDevice));
+    newTouchDevice(CTouchDevice::create(pDevice));
+}
+
+void CInputManager::newTouchDevice(SP<ITouch> pDevice) {
+    const auto PNEWDEV = m_touches.emplace_back(pDevice);
     m_hids.emplace_back(PNEWDEV);
 
     try {

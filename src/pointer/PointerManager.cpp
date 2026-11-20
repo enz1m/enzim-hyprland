@@ -1129,9 +1129,7 @@ void CPointerManager::attachTouch(SP<ITouch> touch) {
         PROTO::idle->onActivity();
     });
 
-    listener->cancel = touch->m_touchEvents.cancel.listen([] {
-        //
-    });
+    listener->cancel = touch->m_touchEvents.cancel.listen([] { g_pSeatManager->sendTouchCancel(); });
 
     listener->frame = touch->m_touchEvents.frame.listen([] { g_pSeatManager->sendTouchFrame(); });
 

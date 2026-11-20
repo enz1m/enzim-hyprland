@@ -223,7 +223,7 @@ namespace Screenshare {
 
         UP<CCursorshareSession> newCursorSession(wl_client* client, WP<CWLPointerResource> pointer);
 
-        void                    onOutputCommit(PHLMONITOR monitor);
+        void                    onOutputCommit(PHLMONITOR monitor, bool copyFBPrepared);
         bool                    isOutputBeingSSd(PHLMONITOR monitor);
         bool                    outputNeedsCopyFB(PHLMONITOR monitor);
         SOutputCopyFBState      outputCopyFBState(PHLMONITOR monitor);

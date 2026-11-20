@@ -448,8 +448,8 @@ void CMonitor::onDisconnect(bool destroy) {
     State::Workspace::monitorDisconnected(m_self.lock());
 
     if (BACKUPMON) {
-        // snap cursor
-        Pointer::pointerController()->warpTo(BACKUPMON->m_position + BACKUPMON->m_transformedSize / 2.F, true);
+        if (CBox{m_position, m_size}.containsPoint(Pointer::mgr()->untransformedPosition()))
+            Pointer::pointerController()->warpTo(BACKUPMON->m_position + BACKUPMON->m_transformedSize / 2.F, true);
     } else {
         Desktop::focusState()->surface().reset();
         Desktop::focusState()->window().reset();

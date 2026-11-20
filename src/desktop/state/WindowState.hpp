@@ -20,6 +20,7 @@ namespace Desktop {
         void                          setGroupsLocked(bool locked);
         void                          raise(PHLWINDOW w);
         void                          lower(PHLWINDOW w);
+        void                          swapOrder(PHLWINDOW a, PHLWINDOW b);
         void                          clear();
 
         // kept for compat with old code, should be removed ASAP

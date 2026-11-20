@@ -1,4 +1,5 @@
 #include "XDGShell.hpp"
+#include "enzremote-shared.hpp"
 #include "XDGDialog.hpp"
 #include <algorithm>
 #include "../Compositor.hpp"
@@ -77,6 +78,8 @@ CXDGPopupResource::CXDGPopupResource(SP<CXdgPopup> resource_, SP<CXDGSurfaceReso
     });
 
     m_resource->setGrab([this](CXdgPopup* r, wl_resource* seat, uint32_t serial) {
+        if (Enzremote::desktop && Enzremote::desktop->popupGrab(seat, m_self.lock()))
+            return;
         LOG(Log::DEBUG, "xdg_popup {:x} requests grab", (uintptr_t)this);
         PROTO::xdgShell->addOrStartGrab(m_self.lock());
     });
@@ -101,6 +104,10 @@ void CXDGPopupResource::applyPositioning(const CBox& box, const Vector2D& t1coor
 
     if UNLIKELY (m_lastRepositionToken)
         repositioned();
+}
+
+Vector2D CXDGPopupResource::inputOffset() {
+    return m_geometry.pos() + accumulateParentOffset();
 }
 
 Vector2D CXDGPopupResource::accumulateParentOffset() {

@@ -48,6 +48,16 @@ void CWindowState::lower(PHLWINDOW w) {
     moveToZ(w, false);
 }
 
+void CWindowState::swapOrder(PHLWINDOW a, PHLWINDOW b) {
+    auto first = std::ranges::find(m_windows, a);
+    auto second = std::ranges::find(m_windows, b);
+    if (first == m_windows.end() || second == m_windows.end())
+        return;
+    std::iter_swap(first, second);
+    if (a->m_monitor) g_pHyprRenderer->damageMonitor(a->m_monitor.lock());
+    if (b->m_monitor) g_pHyprRenderer->damageMonitor(b->m_monitor.lock());
+}
+
 void CWindowState::moveToZ(PHLWINDOW w, bool top) {
     if (!View::validMapped(w) || m_windows.empty())
         return;

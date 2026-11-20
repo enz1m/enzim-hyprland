@@ -18,6 +18,7 @@
 #include "managers/TokenManager.hpp"
 #include "pointer/PointerManager.hpp"
 #include "managers/SeatManager.hpp"
+#include "enzremote-shared.hpp"
 #include "managers/VersionKeeperManager.hpp"
 #include "managers/DonationNagManager.hpp"
 #include "managers/ANRManager.hpp"
@@ -55,6 +56,7 @@
 #include "config/ConfigManager.hpp"
 #include "render/OpenGL.hpp"
 #include "managers/input/InputManager.hpp"
+#include "managers/input/EISInputManager.hpp"
 #include "animation/AnimationManager.hpp"
 #include "ipc/s2/S2.hpp"
 #include "managers/ProtocolManager.hpp"
@@ -601,6 +603,7 @@ void CCompositor::cleanup() {
 
     g_pXWayland.reset();
 
+    Enzremote::desktop.reset();
     wl_display_destroy_clients(g_pCompositor->m_wlDisplay);
 
     State::monitorState()->finish();
@@ -609,6 +612,7 @@ void CCompositor::cleanup() {
 
     removeAllSignals();
 
+    g_pEISInputManager.reset();
     g_pInputManager.reset();
     g_pDynamicPermissionManager.reset();
     g_pDecorationPositioner.reset();
@@ -730,6 +734,13 @@ void CCompositor::initManagers(eManagersInitStage stage) {
 
             LOG(Log::DEBUG, "Creating the InputManager!");
             g_pInputManager = makeUnique<CInputManager>();
+
+            LOG(Log::DEBUG, "Creating the EISInputManager!");
+            g_pEISInputManager = makeUnique<CEISInputManager>();
+
+            const auto sharedDesktop = getenv("ENZREMOTE_SHARED_DESKTOP");
+            if (sharedDesktop && std::string_view(sharedDesktop) == "1")
+                Enzremote::desktop = std::make_unique<Enzremote::CRemoteDesktop>();
 
             LOG(Log::DEBUG, "Creating the XWaylandManager!");
             g_pXWaylandManager = makeUnique<CHyprXWaylandManager>();

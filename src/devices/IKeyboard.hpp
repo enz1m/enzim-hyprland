@@ -71,9 +71,10 @@ class IKeyboard : public IHID {
     bool                              shareStates();
     void                              setShareStatesAuto(bool shareStates);
 
-    bool                              m_active     = false;
-    bool                              m_enabled    = true;
-    bool                              m_allowBinds = true;
+    bool                              m_active        = false;
+    bool                              m_enabled       = true;
+    bool                              m_allowBinds    = true;
+    bool                              m_forcedNoBinds = false;
 
     // permission flag: whether this keyboard is allowed to be processed
     bool m_allowed = true;

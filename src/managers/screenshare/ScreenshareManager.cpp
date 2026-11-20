@@ -11,7 +11,7 @@ CScreenshareManager::CScreenshareManager() {
     ;
 }
 
-void CScreenshareManager::onOutputCommit(PHLMONITOR monitor) {
+void CScreenshareManager::onOutputCommit(PHLMONITOR monitor, bool copyFBPrepared) {
     std::erase_if(m_sessions, [&](const WP<CScreenshareSession>& session) { return session.expired(); });
 
     // if no pending frames, and no sessions are sharing, then unblock ds
@@ -30,6 +30,10 @@ void CScreenshareManager::onOutputCommit(PHLMONITOR monitor) {
             return;
 
         if (frame->m_session->monitor() != monitor)
+            return;
+
+        // Window capture draws its own scene; only output/region capture needs a prepared mirror framebuffer.
+        if (frame->m_session->m_type != SHARE_WINDOW && !copyFBPrepared)
             return;
 
         if (frame->m_session->m_type == SHARE_WINDOW) {

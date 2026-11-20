@@ -62,6 +62,7 @@ class CXDGPopupResource {
     ~CXDGPopupResource();
 
     static SP<CXDGPopupResource> fromResource(wl_resource*);
+    Vector2D                     inputOffset();
 
     bool                         good();
 

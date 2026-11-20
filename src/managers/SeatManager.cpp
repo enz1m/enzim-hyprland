@@ -1,4 +1,5 @@
 #include "SeatManager.hpp"
+#include "protocols/enzremote-shared.hpp"
 #include "../protocols/core/Seat.hpp"
 #include "../protocols/core/DataDevice.hpp"
 #include "../protocols/DataDeviceWlr.hpp"
@@ -237,6 +238,7 @@ void CSeatManager::updateActiveKeyboardData() {
 }
 
 void CSeatManager::setKeyboardFocus(SP<CWLSurfaceResource> surf) {
+    if (Enzremote::desktop && Enzremote::desktop->blocksLocalSurface(surf)) surf.reset();
     if (m_state.keyboardFocus == surf)
         return;
 
@@ -344,6 +346,7 @@ void CSeatManager::sendKeyboardMods(uint32_t depressed, uint32_t latched, uint32
 }
 
 void CSeatManager::setPointerFocus(SP<CWLSurfaceResource> surf, const Vector2D& local) {
+    if (Enzremote::desktop && Enzremote::desktop->blocksLocalSurface(surf)) surf.reset();
     const bool dndActive = PROTO::data && PROTO::data->dndActive();
 
     if (m_state.pointerFocus == surf)
@@ -586,8 +589,13 @@ void CSeatManager::sendTouchFrame() {
 }
 
 void CSeatManager::sendTouchCancel() {
-    if (!m_state.touchFocusResource)
+    if (!m_state.touchFocusResource) {
+        m_listeners.touchSurfaceDestroy.reset();
+        m_state.touchFocus.reset();
+        m_touchLocks = 0;
+        m_events.touchFocusChange.emit();
         return;
+    }
 
     for (auto const& s : m_seatResources) {
         if (s->resource->client() != m_state.touchFocusResource->client())
@@ -600,6 +608,12 @@ void CSeatManager::sendTouchCancel() {
             t->sendCancel();
         }
     }
+
+    m_listeners.touchSurfaceDestroy.reset();
+    m_state.touchFocus.reset();
+    m_state.touchFocusResource.reset();
+    m_touchLocks = 0;
+    m_events.touchFocusChange.emit();
 }
 
 void CSeatManager::sendTouchShape(int32_t id, const Vector2D& shape) {
