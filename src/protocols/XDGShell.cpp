@@ -5,6 +5,13 @@
 #include "../managers/SeatManager.hpp"
 #include "../managers/eventLoop/EventLoopManager.hpp"
 #include "../output/Monitor.hpp"
+#include "../desktop/state/FocusState.hpp"
+#include "../workspace/HLWorkspace.hpp"
+#include "../layout/space/Space.hpp"
+#include "../config/ConfigValue.hpp"
+#include <array>
+#include <cmath>
+#include <string_view>
 #include "core/Seat.hpp"
 #include "core/Compositor.hpp"
 #include "../desktop/DesktopTypes.hpp"
@@ -480,6 +487,26 @@ void CXDGToplevelResource::scheduleStateApplication() {
         if (const auto PSTATES = sc<int*>(wl_array_add(&arr, m_pendingApply.states.size() * sizeof(int))))
             std::ranges::copy(m_pendingApply.states, PSTATES);
 
+        if (m_owner && !m_owner->m_mapped && m_resource->version() >= 4) {
+            static constexpr std::array SHELL_SURFACES = {
+                "dev.enzui.Desktop", "dev.enzui.Dock", "dev.enzui.Launcher", "dev.enzui.QuickSearch",
+                "dev.enzui.ControlCenter", "dev.enzui.WorkspaceOverview", "dev.enzui.Sidebar",
+                "dev.enzui.SidebarPane", "dev.enzui.SidebarBacking", "dev.enzui.PluginPanel",
+                "dev.enzui.WindowSpread", "dev.enzui.Switcher", "dev.enzui.AssistantPanel",
+                "dev.enzui.AssistantTrigger", "dev.enzui.NotificationCenter", "dev.enzui.NotificationToasts",
+                "dev.enzui.EmojiPicker", "dev.enzui.Keyboard", "dev.enzui.Osd", "dev.enzui.Capture"};
+            const auto SHELL = std::ranges::any_of(SHELL_SURFACES, [&](std::string_view id) { return id == m_state.appid; });
+            auto monitor = m_window ? m_window->m_monitor.lock() : nullptr;
+            if (!monitor)
+                monitor = Desktop::focusState()->monitor();
+            if (!SHELL && monitor && monitor->m_activeWorkspace && monitor->m_activeWorkspace->space()) {
+                const auto AREA = monitor->m_activeWorkspace->space()->workArea(true);
+                static auto BORDER = CConfigValue<Config::INTEGER>("general:border_size");
+                // Advertise the work area before the first buffer, including the outer gaps.
+                m_resource->sendConfigureBounds(std::max(1, static_cast<int>(std::floor(AREA.w - 2 * *BORDER))),
+                                                std::max(1, static_cast<int>(std::floor(AREA.h - 2 * *BORDER))));
+            }
+        }
         m_resource->sendConfigure(m_pendingApply.size.x, m_pendingApply.size.y, &arr);
 
         wl_array_release(&arr);
