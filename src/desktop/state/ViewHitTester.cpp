@@ -54,6 +54,25 @@ PHLWINDOW CViewHitTester::windowAtInternal(const Vector2D& pos, uint16_t propert
 
     const auto  isShadowedByModal = [](PHLWINDOW w) -> bool { return *PMODALPARENTBLOCKING && !w->backend().isX11() && w->backend().traits().hasModalChild; };
 
+    const auto containsInput = [&](PHLWINDOW w, const CBox& box) {
+        if (!box.containsPoint(pos))
+            return false;
+        if (w->backend().isX11())
+            return true;
+        const auto& id = w->backend().metadata().appID;
+        const bool shell = id == "dev.enzui.Desktop" || id == "dev.enzui.Sidebar" ||
+            id == "dev.enzui.SidebarBacking" || id == "dev.enzui.ControlCenter" ||
+            id == "dev.enzui.PluginPanel" || id == "dev.enzui.NotificationCenter" ||
+            id == "dev.enzui.WorkspaceOverview" || id == "dev.enzui.QuickSearch" ||
+            id == "dev.enzui.AssistantTrigger" || id == "dev.enzui.AssistantPanel" ||
+            id == "dev.enzui.Launcher" || id == "dev.enzui.Dock";
+        const auto surface = w->wlSurface()->resource();
+        if (!shell || !surface || surface->m_current.inputIsInfinite)
+            return true;
+        return surface->at(pos - w->position(Desktop::View::IGeometric::GEOMETRIC_GOAL), true).first != nullptr;
+    };
+
+
     // pinned windows on top of floating regardless
     if (properties & ALLOW_FLOATING) {
         for (auto const& w : WINDOWS | std::views::reverse) {
@@ -66,7 +85,7 @@ PHLWINDOW CViewHitTester::windowAtInternal(const Vector2D& pos, uint16_t propert
                 CBox       box = BB.copy().expand(!w->backend().traits().overrideRedirect ? BORDER_GRAB_AREA : 0);
                 if (HITBOX_SHRINK > 0 && w != LASTFOCUSED)
                     box = box.copy().expand(-HITBOX_SHRINK);
-                if (box.containsPoint(pos))
+                if (containsInput(w, box))
                     return w;
 
                 if (!w->backend().isX11()) {
@@ -110,7 +129,7 @@ PHLWINDOW CViewHitTester::windowAtInternal(const Vector2D& pos, uint16_t propert
                     CBox       box = BB.copy().expand(!w->backend().traits().overrideRedirect ? BORDER_GRAB_AREA : 0);
                     if (HITBOX_SHRINK > 0 && w != LASTFOCUSED)
                         box = box.copy().expand(-HITBOX_SHRINK);
-                    if (box.containsPoint(pos)) {
+                    if (containsInput(w, box)) {
                         if (w->backend().isX11()) {
                             const auto TRAITS = w->backend().traits();
                             if (TRAITS.overrideRedirect && !TRAITS.wantsFocus) {
@@ -359,4 +378,12 @@ SP<CWLSurfaceResource> CViewHitTester::layerSurfaceAt(const Vector2D& pos, std::
     }
 
     return nullptr;
+}
+
+extern "C" __attribute__((visibility("default"))) bool enzui_shell_input_regions_v1() {
+    return true;
+}
+
+extern "C" __attribute__((visibility("default"))) bool enzui_dock_input_regions_v1() {
+    return true;
 }
