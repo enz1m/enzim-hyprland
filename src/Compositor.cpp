@@ -320,12 +320,17 @@ void CCompositor::initServer(std::string socketName, int socketFd) {
     option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_HEADLESS;
     option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_MANDATORY;
     implementations.emplace_back(option);
-    option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_DRM;
-    option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_IF_AVAILABLE;
-    implementations.emplace_back(option);
-    option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_WAYLAND;
-    option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_FALLBACK;
-    implementations.emplace_back(option);
+    // enzUI: a remote login has neither a seat nor a parent compositor; the
+    // headless backend renders on the node named by ENZUI_RENDER_NODE.
+    const char* ENZUIBACKEND = getenv("ENZUI_COMPOSITOR_BACKEND");
+    if (!ENZUIBACKEND || std::string_view{ENZUIBACKEND} != "headless-only") {
+        option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_DRM;
+        option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_IF_AVAILABLE;
+        implementations.emplace_back(option);
+        option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_WAYLAND;
+        option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_FALLBACK;
+        implementations.emplace_back(option);
+    }
 
     m_aqBackend = CBackend::create(implementations, options);
 
