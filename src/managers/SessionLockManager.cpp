@@ -49,6 +49,8 @@ CSessionLockManager::CSessionLockManager() {
     m_listeners.newLock = PROTO::sessionLock->m_events.newLock.listen([this](const auto& lock) { this->onNewSessionLock(lock); });
 }
 
+void enzuiRevokePrivileged();
+
 void CSessionLockManager::onNewSessionLock(SP<CSessionLock> pLock) {
     static auto PALLOWRELOCK = CConfigValue<Config::INTEGER>("misc:allow_session_lock_restore");
 
@@ -62,6 +64,8 @@ void CSessionLockManager::onNewSessionLock(SP<CSessionLock> pLock) {
         return; // Not allowing to relock in case the old lock is still in a limbo
 
     LOG(Log::DEBUG, "Session got locked by {:x}", (uintptr_t)pLock.get());
+    // enzUI: capture and virtual input end when the session locks.
+    enzuiRevokePrivileged();
 
     m_sessionLock       = makeUnique<SSessionLock>();
     m_sessionLock->lock = pLock;

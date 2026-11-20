@@ -265,9 +265,12 @@ static std::vector<SP<Aquamarine::IOutput>> pendingOutputs;
 
 //
 
+bool enzuiAllowsGlobal(const wl_client* client, const wl_global* global);
+void enzuiRegisterAdmissionCommand();
+
 static bool filterGlobals(const wl_client* client, const wl_global* global, void* data) {
     if (!PROTO::securityContext->isClientSandboxed(client))
-        return true;
+        return enzuiAllowsGlobal(client, global);
 
     return !g_pProtocolManager || !g_pProtocolManager->isGlobalPrivileged(global);
 }
@@ -729,6 +732,7 @@ void CCompositor::initManagers(eManagersInitStage stage) {
         case STAGE_LATE: {
             LOG(Log::DEBUG, "Creating Socket1");
             IPC::Socket1::sock() = makeUnique<IPC::Socket1::CSocket1>();
+            enzuiRegisterAdmissionCommand();
 
             LOG(Log::DEBUG, "Creating the InputManager!");
             g_pInputManager = makeUnique<CInputManager>();

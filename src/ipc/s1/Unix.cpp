@@ -18,6 +18,9 @@
 using namespace Hyprutils::OS;
 using namespace IPC::Socket1;
 
+IPC::Socket1::SResponse enzuiDispatchControlPeer(int fd, std::string request, pid_t pid,
+    const std::function<IPC::Socket1::SResponse(std::string&&, pid_t)>& handler);
+
 #if defined(__DragonFly__) || defined(__FreeBSD__)
 #include <sys/ucred.h>
 #define CRED_T   xucred
@@ -321,7 +324,7 @@ int CUnixImpl::onClientEvent(int fd, uint32_t mask) {
         }
 
         if (!request.empty()) {
-            auto response = m_requestHandler(std::move(request), peer->pid());
+            auto response = enzuiDispatchControlPeer(fd, std::move(request), peer->pid(), m_requestHandler);
             if (!peer->setResponse(std::move(response))) {
                 removeById(peer->id());
                 return 0;

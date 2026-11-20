@@ -405,3 +405,498 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 
     return std::ranges::find(ALLOWED_WHITELIST, global) == ALLOWED_WHITELIST.end();
 }
+
+// enzUI: capture and virtual-input globals for identified processes only.
+//
+// With ENZUI_PRIVILEGED_CLIENTS=enforce, a native client sees the screen
+// capture and virtual input globals only when the compositor can bind it
+// to an approved process: the registered shell (input), a capture helper
+// the shell announced just before starting it (one use, its own child, the
+// announced executable), a process inside a cgroup named by a root-owned
+// grant, the screen-sharing portal (capture), a helper that portal starts
+// itself such as the screenshot or colour picker tool (capture), or the
+// remote desktop portal (input, after its own consent dialog). Executable
+// identity is the inode of /proc/PID/exe, never a name; LD_PRELOAD and
+// LD_AUDIT disqualify. A session lock disconnects every admitted client but
+// the shell, and while locked nothing else is admitted.
+#include "SessionLockManager.hpp"
+#include "../ipc/s1/S1.hpp"
+#include <sys/stat.h>
+#include <dirent.h>
+#include <chrono>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <charconv>
+#include <utility>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <hyprutils/os/FileDescriptor.hpp>
+
+namespace EnzuiAdmission {
+    using Hyprutils::OS::CFileDescriptor;
+
+    static const std::string& setting(const char* name) {
+        static const std::unordered_map<std::string, std::string> STARTUP = [] {
+            std::unordered_map<std::string, std::string> values;
+            for (const auto* key : {"ENZUI_PRIVILEGED_CLIENTS", "ENZUI_SHELL_EXE", "ENZUI_SHELL_LAUNCHER_PID", "ENZUI_SHELL_LAUNCHER_START",
+                                    "ENZUI_SHELL_LAUNCHER_FD", "ENZUI_PORTAL_EXES", "ENZUI_PORTAL_INPUT_EXES", "ENZUI_PORTAL_HELPER_EXES",
+                                    "ENZUI_DEV_PRIVILEGED_EXES", "LD_LIBRARY_PATH"})
+                values.emplace(key, getenv(key) ? getenv(key) : "");
+            return values;
+        }();
+        return STARTUP.at(name);
+    }
+
+    static bool pidfdAlive(int fd) {
+        pollfd interest{.fd = fd, .events = POLLIN};
+        return fd >= 0 && poll(&interest, 1, 0) == 0;
+    }
+
+    struct SPeer {
+        pid_t pid = 0;
+        CFileDescriptor handle;
+    };
+
+    static SPeer peer(int fd) {
+        ucred credentials{};
+        socklen_t size = sizeof(credentials);
+        if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &size) || size != sizeof(credentials) || credentials.pid <= 0 || credentials.uid != getuid())
+            return {};
+        int handle = -1;
+        size = sizeof(handle);
+        if (getsockopt(fd, SOL_SOCKET, SO_PEERPIDFD, &handle, &size))
+            return {};
+        CFileDescriptor owned(handle);
+        if (size != sizeof(handle) || fcntl(handle, F_SETFD, FD_CLOEXEC) || !pidfdAlive(handle))
+            return {};
+        return {.pid = credentials.pid, .handle = std::move(owned)};
+    }
+
+    static thread_local const SPeer* controlPeer = nullptr;
+
+    enum eKind : uint8_t {
+        KIND_CAPTURE = 1,
+        KIND_INPUT   = 2,
+    };
+
+    struct SProc {
+        pid_t              ppid  = 0;
+        unsigned long long start = 0;
+    };
+
+    struct SIntent {
+        pid_t                                 shell = 0;
+        unsigned long long                    shellStart = 0;
+        dev_t                                 dev   = 0;
+        ino_t                                 ino   = 0;
+        uint8_t                               kinds = 0;
+        std::chrono::steady_clock::time_point deadline;
+    };
+
+    struct SAdmitted {
+        wl_listener destroy;
+        uint8_t     kinds = 0;
+        int         peerHandle = -1;
+        wl_event_source* exitSource = nullptr;
+        wl_client*  client = nullptr;
+    };
+
+    static std::vector<SIntent>                          intents;
+    static std::unordered_map<const wl_client*, SAdmitted*> admitted;
+    static pid_t                                         shellPid   = 0;
+    static unsigned long long                            shellStart = 0;
+    static CFileDescriptor                               shellHandle;
+    static dev_t                                         shellDevice = 0;
+    static ino_t                                         shellInode = 0;
+
+    static bool enforcing() {
+        return setting("ENZUI_PRIVILEGED_CLIENTS") == "enforce";
+    }
+
+    static uint8_t kindOf(const wl_global* global) {
+        const auto* interface = wl_global_get_interface(global);
+        if (!interface || !interface->name)
+            return 0;
+        const std::string_view name{interface->name};
+        if (name == "zwlr_screencopy_manager_v1" || name == "hyprland_toplevel_export_manager_v1" || name == "ext_image_copy_capture_manager_v1" ||
+            name == "ext_output_image_capture_source_manager_v1" || name == "ext_foreign_toplevel_image_capture_source_manager_v1")
+            return KIND_CAPTURE;
+        if (name == "zwlr_virtual_pointer_manager_v1" || name == "zwp_virtual_keyboard_manager_v1")
+            return KIND_INPUT;
+        return 0;
+    }
+
+    static bool readProc(pid_t pid, SProc& out) {
+        std::ifstream stream("/proc/" + std::to_string(pid) + "/stat");
+        std::string   text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+        const auto    close = text.rfind(')');
+        if (close == std::string::npos)
+            return false;
+        std::istringstream fields(text.substr(close + 1));
+        std::string        field;
+        for (int index = 0; fields >> field; ++index) {
+            if (index == 0 && (field == "Z" || field == "X"))
+                return false;
+            if (index == 1)
+                out.ppid = std::atoi(field.c_str());
+            if (index == 19) {
+                out.start = std::strtoull(field.c_str(), nullptr, 10);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool alive(pid_t pid, unsigned long long start) {
+        SProc proc;
+        return pid > 0 && readProc(pid, proc) && proc.start == start;
+    }
+
+    static bool injected(pid_t pid);
+    static bool exeIs(pid_t pid, const std::string& path);
+    static bool inode(const std::string& path, dev_t& dev, ino_t& ino);
+
+    template <typename T> static bool number(const std::string& text, T& value) {
+        if (text.empty() || text.size() > 20)
+            return false;
+        const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+        return result.ec == std::errc{} && result.ptr == text.data() + text.size() && value > 0;
+    }
+
+    struct SLauncher {
+        pid_t pid = 0;
+        unsigned long long start = 0;
+        CFileDescriptor handle;
+    };
+
+    static const SLauncher& launcher() {
+        static const SLauncher VERIFIED = [] {
+            SLauncher result;
+            int inherited = -1;
+            if (!number(setting("ENZUI_SHELL_LAUNCHER_PID"), result.pid) || !number(setting("ENZUI_SHELL_LAUNCHER_START"), result.start) ||
+                !number(setting("ENZUI_SHELL_LAUNCHER_FD"), inherited) || inherited < 3)
+                return SLauncher{};
+            // The inherited capability pins the supervisor itself; a numeric
+            // PID/start pair cannot turn a reused process into that supervisor.
+            std::ifstream info("/proc/self/fdinfo/" + std::to_string(inherited));
+            std::string line;
+            pid_t target = 0;
+            while (std::getline(info, line)) {
+                if (line.starts_with("Pid:")) {
+                    std::istringstream fields(line.substr(4));
+                    fields >> target;
+                }
+            }
+            if (target != result.pid || syscall(SYS_pidfd_send_signal, inherited, 0, nullptr, 0) || !pidfdAlive(inherited))
+                return SLauncher{};
+            result.handle = CFileDescriptor(fcntl(inherited, F_DUPFD_CLOEXEC, 3));
+            close(inherited);
+            unsetenv("ENZUI_SHELL_LAUNCHER_FD");
+            struct stat owner{};
+            if (!result.handle.isValid() || stat(("/proc/" + std::to_string(result.pid)).c_str(), &owner) || owner.st_uid != getuid() || !alive(result.pid, result.start))
+                return SLauncher{};
+            return result;
+        }();
+        return VERIFIED;
+    }
+
+    static bool claimShell(pid_t pid, unsigned long long start, int peerHandle) {
+        const auto& parent = launcher();
+        SProc proc;
+        if (!pidfdAlive(parent.handle.get()) || !readProc(pid, proc) || proc.start != start || proc.ppid != parent.pid || !alive(parent.pid, parent.start) ||
+            injected(pid) || !pidfdAlive(peerHandle))
+            return false;
+        dev_t device = 0;
+        ino_t image = 0;
+        if (!inode("/proc/" + std::to_string(pid) + "/exe", device, image))
+            return false;
+        if (shellPid && pidfdAlive(shellHandle.get()))
+            return pid == shellPid && start == shellStart && device == shellDevice && image == shellInode;
+        if (setting("ENZUI_SHELL_EXE").empty() || !exeIs(pid, setting("ENZUI_SHELL_EXE")))
+            return false;
+        CFileDescriptor handle(fcntl(peerHandle, F_DUPFD_CLOEXEC, 3));
+        if (!handle.isValid() || !pidfdAlive(handle.get()))
+            return false;
+        intents.clear();
+        shellPid   = pid;
+        shellStart = start;
+        shellHandle = std::move(handle);
+        shellDevice = device;
+        shellInode = image;
+        return true;
+    }
+
+    static bool inode(const std::string& path, dev_t& dev, ino_t& ino) {
+        struct stat st {};
+        if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+            return false;
+        dev = st.st_dev;
+        ino = st.st_ino;
+        return true;
+    }
+
+    static bool exeIs(pid_t pid, const std::string& path) {
+        dev_t exeDev = 0, pathDev = 0;
+        ino_t exeIno = 0, pathIno = 0;
+        return inode("/proc/" + std::to_string(pid) + "/exe", exeDev, exeIno) && inode(path, pathDev, pathIno) && exeDev == pathDev && exeIno == pathIno;
+    }
+
+    static bool exeInList(pid_t pid, const char* variable) {
+        const auto& value = setting(variable);
+        if (value.empty())
+            return false;
+        std::stringstream list(value);
+        std::string       path;
+        while (std::getline(list, path, ':')) {
+            if (!path.empty() && path.front() == '/' && exeIs(pid, path))
+                return true;
+        }
+        return false;
+    }
+
+    // Loader variables that would run other code inside an identified binary:
+    // any preload or audit library, or a library search path other than the
+    // one the compositor itself was started with.
+    static bool injected(pid_t pid) {
+        std::ifstream stream("/proc/" + std::to_string(pid) + "/environ");
+        std::string   entry;
+        const auto    mine = std::string{"LD_LIBRARY_PATH="} + setting("LD_LIBRARY_PATH");
+        while (std::getline(stream, entry, '\0')) {
+            if ((entry.starts_with("LD_PRELOAD=") || entry.starts_with("LD_AUDIT=")) && entry.find('=') + 1 < entry.size())
+                return true;
+            if (entry.starts_with("LD_LIBRARY_PATH=") && entry != mine && entry.size() > 16)
+                return true;
+        }
+        return !stream.eof();
+    }
+
+    static std::string cgroupOf(pid_t pid) {
+        std::ifstream stream("/proc/" + std::to_string(pid) + "/cgroup");
+        std::string   line;
+        while (std::getline(stream, line)) {
+            if (line.starts_with("0::"))
+                return line.substr(3);
+        }
+        return "";
+    }
+
+    static bool rootOwned(const struct stat& st) {
+        return st.st_uid == 0 && !(st.st_mode & (S_IWGRP | S_IWOTH));
+    }
+
+    // Grants are root-owned, singly linked files in the OS's public, root-owned
+    // grant directory (the private /run/enzimos stays 0700):
+    //   uid=1000
+    //   cgroup=/system.slice/system-enzimos\x2ddesktop\x2dsharing.slice/enzimos-desktop-sharing@1000.service
+    //   kinds=capture,input
+    static uint8_t granted(pid_t pid, uid_t uid) {
+        static const char* DIRECTORY = "/run/enzimos-compositor-grants";
+        struct stat        directory {};
+        if (lstat(DIRECTORY, &directory) != 0 || !S_ISDIR(directory.st_mode) || !rootOwned(directory))
+            return 0;
+        const auto group = cgroupOf(pid);
+        if (group.empty())
+            return 0;
+        uint8_t kinds = 0;
+        DIR*    listing = opendir(DIRECTORY);
+        if (!listing)
+            return 0;
+        for (int count = 0; const auto* entry = readdir(listing); ++count) {
+            const std::string name{entry->d_name};
+            if (count > 64)
+                break;
+            if (!name.ends_with(".grant"))
+                continue;
+            const auto  path = std::string{DIRECTORY} + "/" + name;
+            struct stat file {};
+            if (lstat(path.c_str(), &file) != 0 || !S_ISREG(file.st_mode) || !rootOwned(file) || file.st_nlink != 1 || file.st_size > 4096)
+                continue;
+            std::ifstream stream(path);
+            std::string   line, cgroup;
+            long long     grantUid   = -1;
+            uint8_t       grantKinds = 0;
+            while (std::getline(stream, line)) {
+                if (line.starts_with("uid="))
+                    grantUid = std::atoll(line.c_str() + 4);
+                else if (line.starts_with("cgroup="))
+                    cgroup = line.substr(7);
+                else if (line.starts_with("kinds=")) {
+                    if (line.find("capture") != std::string::npos)
+                        grantKinds |= KIND_CAPTURE;
+                    if (line.find("input") != std::string::npos)
+                        grantKinds |= KIND_INPUT;
+                }
+            }
+            if (grantUid == (long long)uid && cgroup.starts_with("/system.slice/") && (group == cgroup || group.starts_with(cgroup + "/")))
+                kinds |= grantKinds;
+        }
+        closedir(listing);
+        return kinds;
+    }
+
+    static void forget(wl_listener* listener, void*) {
+        SAdmitted* entry = wl_container_of(listener, entry, destroy);
+        if (entry->exitSource)
+            wl_event_source_remove(entry->exitSource);
+        if (entry->peerHandle >= 0)
+            close(entry->peerHandle);
+        std::erase_if(admitted, [entry](const auto& pair) { return pair.second == entry; });
+        wl_list_remove(&listener->link);
+        delete entry;
+    }
+
+    static int peerExited(int, uint32_t, void* data) {
+        wl_client_destroy(static_cast<SAdmitted*>(data)->client);
+        return 0;
+    }
+
+    static uint8_t decide(const wl_client* client) {
+        if (const auto known = admitted.find(client); known != admitted.end())
+            return pidfdAlive(known->second->peerHandle) ? known->second->kinds : 0;
+        auto owner = peer(wl_client_get_fd(const_cast<wl_client*>(client)));
+        const auto pid = owner.pid;
+        SProc proc;
+        if (pid <= 0 || !readProc(pid, proc))
+            return 0;
+        uint8_t kinds = 0;
+        if (claimShell(pid, proc.start, owner.handle.get()))
+            kinds |= KIND_INPUT;
+        if (!injected(pid)) {
+            if (exeInList(pid, "ENZUI_PORTAL_EXES"))
+                kinds |= KIND_CAPTURE;
+            if (exeInList(pid, "ENZUI_DEV_PRIVILEGED_EXES"))
+                kinds |= KIND_CAPTURE | KIND_INPUT;
+            if (exeInList(pid, "ENZUI_PORTAL_INPUT_EXES"))
+                kinds |= KIND_INPUT;
+            if (exeInList(pid, "ENZUI_PORTAL_HELPER_EXES") && exeInList(proc.ppid, "ENZUI_PORTAL_EXES") && !injected(proc.ppid))
+                kinds |= KIND_CAPTURE;
+            const auto now = std::chrono::steady_clock::now();
+            std::erase_if(intents, [now](const auto& intent) {
+                return now > intent.deadline || intent.shell != shellPid || intent.shellStart != shellStart || !pidfdAlive(shellHandle.get());
+            });
+            dev_t exeDev = 0;
+            ino_t exeIno = 0;
+            if (inode("/proc/" + std::to_string(pid) + "/exe", exeDev, exeIno)) {
+                for (auto it = intents.begin(); it != intents.end(); ++it) {
+                    if (proc.ppid == it->shell && exeDev == it->dev && exeIno == it->ino) {
+                        kinds |= it->kinds;
+                        intents.erase(it);
+                        break;
+                    }
+                }
+            }
+        }
+        kinds |= granted(pid, getuid());
+        SProc finalProc;
+        if (!pidfdAlive(owner.handle.get()) || !readProc(pid, finalProc) || finalProc.start != proc.start || finalProc.ppid != proc.ppid)
+            return 0;
+        if (kinds) {
+            auto* entry            = new SAdmitted;
+            entry->kinds           = kinds;
+            entry->client          = const_cast<wl_client*>(client);
+            entry->peerHandle      = fcntl(owner.handle.get(), F_DUPFD_CLOEXEC, 3);
+            if (entry->peerHandle >= 0)
+                entry->exitSource = wl_event_loop_add_fd(g_pCompositor->m_wlEventLoop, entry->peerHandle, WL_EVENT_READABLE, peerExited, entry);
+            if (!entry->exitSource) {
+                if (entry->peerHandle >= 0)
+                    close(entry->peerHandle);
+                delete entry;
+                return 0;
+            }
+            entry->destroy.notify  = forget;
+            wl_client_add_destroy_listener(const_cast<wl_client*>(client), &entry->destroy);
+            admitted[client] = entry;
+            LOG(Log::DEBUG, "enzUI admission: pid {} admitted for {}", pid, (int)kinds);
+        }
+        return kinds;
+    }
+
+    static bool isShell(const wl_client* client) {
+        auto owner = peer(wl_client_get_fd(const_cast<wl_client*>(client)));
+        SProc proc;
+        return owner.pid > 0 && readProc(owner.pid, proc) && claimShell(owner.pid, proc.start, owner.handle.get());
+    }
+
+    static std::string command(const IPC::Socket1::SRequest& request) {
+        const pid_t pid = request.pid;
+        SProc       proc;
+        if (!controlPeer || controlPeer->pid != pid || !readProc(pid, proc) || !claimShell(pid, proc.start, controlPeer->handle.get()))
+            return "error: not the registered shell";
+        std::istringstream words(request.command);
+        std::string        verb, action;
+        words >> verb >> action;
+        if (action != "intent")
+            return "error: unknown request";
+        std::string kindsText, path;
+        long long   ttl = 0;
+        words >> kindsText >> path >> ttl;
+        SIntent intent;
+        intent.shell      = pid;
+        intent.shellStart = proc.start;
+        if (kindsText == "capture" || kindsText == "capture,input")
+            intent.kinds |= KIND_CAPTURE;
+        if (kindsText == "input" || kindsText == "capture,input")
+            intent.kinds |= KIND_INPUT;
+        std::string extra;
+        if (!intent.kinds || path.empty() || path.front() != '/' || !inode(path, intent.dev, intent.ino) || ttl < 100 || ttl > 10000 || intents.size() >= 16 || words >> extra)
+            return "error: invalid intent";
+        if (!pidfdAlive(controlPeer->handle.get()) || !pidfdAlive(launcher().handle.get()))
+            return "error: peer exited";
+        intent.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl);
+        intents.push_back(intent);
+        return "ok";
+    }
+}
+
+IPC::Socket1::SResponse enzuiDispatchControlPeer(int fd, std::string request, pid_t pid,
+    const std::function<IPC::Socket1::SResponse(std::string&&, pid_t)>& handler) {
+    if (!EnzuiAdmission::enforcing())
+        return handler(std::move(request), pid);
+    auto owner = EnzuiAdmission::peer(fd);
+    // Privileged handlers decide synchronously; deferred replies never retain
+    // this borrowed context or authenticate another request through it.
+    struct SScope {
+        const EnzuiAdmission::SPeer* previous;
+        ~SScope() { EnzuiAdmission::controlPeer = previous; }
+    } scope{std::exchange(EnzuiAdmission::controlPeer, &owner)};
+    return handler(std::move(request), owner.pid == pid ? pid : 0);
+}
+
+bool enzuiAllowsGlobal(const wl_client* client, const wl_global* global) {
+    if (!EnzuiAdmission::enforcing())
+        return true;
+    const auto kind = EnzuiAdmission::kindOf(global);
+    if (!kind)
+        return true;
+    if (g_pSessionLockManager && g_pSessionLockManager->isSessionLocked() && !EnzuiAdmission::isShell(client))
+        return false;
+    return EnzuiAdmission::decide(client) & kind;
+}
+
+void enzuiRevokePrivileged() {
+    if (!EnzuiAdmission::enforcing())
+        return;
+    std::vector<wl_client*> revoked;
+    for (const auto& [client, _] : EnzuiAdmission::admitted) {
+        if (!EnzuiAdmission::isShell(client))
+            revoked.push_back(const_cast<wl_client*>(client));
+    }
+    for (auto* client : revoked) {
+        LOG(Log::DEBUG, "enzUI admission: session locked, disconnecting a capture or input client");
+        wl_client_destroy(client);
+    }
+}
+
+void enzuiRegisterAdmissionCommand() {
+    if (!EnzuiAdmission::enforcing() || !IPC::Socket1::sock())
+        return;
+    (void)EnzuiAdmission::launcher();
+    IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
+        .name    = "enzuiadmit",
+        .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
+        .handler = [](const IPC::Socket1::SRequest& request) -> IPC::Socket1::SResponse { return EnzuiAdmission::command(request); },
+    });
+}
