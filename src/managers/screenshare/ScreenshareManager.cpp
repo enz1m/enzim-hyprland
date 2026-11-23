@@ -80,6 +80,11 @@ UP<CScreenshareSession> CScreenshareManager::newSession(wl_client* client, PHLWI
 
     UP<CScreenshareSession> session = UP<CScreenshareSession>(new CScreenshareSession(window, client));
 
+    if UNLIKELY (!session->isActive()) {
+        LOG(Log::ERR, "Screenshare session stopped during setup, not sharing");
+        return nullptr;
+    }
+
     session->m_self = session;
     m_sessions.emplace_back(session);
 
@@ -112,6 +117,11 @@ WP<CScreenshareSession> CScreenshareManager::getManagedSession(eScreenshareType 
     if (type == SHARE_NONE)
         return {};
 
+    if UNLIKELY (type == SHARE_WINDOW && (!window || !window->mapped())) {
+        LOG(Log::ERR, "Client requested sharing of window that is gone or not shareable!");
+        return {};
+    }
+
     auto it = std::ranges::find_if(m_managedSessions, [&](const auto& session) {
         if (session->m_session->m_client != client || session->m_session->m_type != type)
             return false;
@@ -135,6 +145,11 @@ WP<CScreenshareSession> CScreenshareManager::getManagedSession(eScreenshareType 
             case SHARE_REGION: session = UP<CScreenshareSession>(new CScreenshareSession(monitor, captureBox, client)); break;
             case SHARE_NONE:
             default: return {};
+        }
+
+        if UNLIKELY (!session->isActive()) {
+            LOG(Log::ERR, "Screenshare session stopped during setup, not sharing");
+            return {};
         }
 
         session->m_self = session;
