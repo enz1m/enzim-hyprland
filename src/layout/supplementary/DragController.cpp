@@ -17,6 +17,7 @@
 #include "../../desktop/view/Group.hpp"
 #include "../../render/Renderer.hpp"
 #include "../../state/MonitorState.hpp"
+#include "../../protocols/core/Compositor.hpp"
 
 #include <hyprutils/utils/ScopeGuard.hpp>
 #include <string_view>
@@ -56,6 +57,85 @@ static void setClientResizingState(SP<ITarget> target, bool resizing) {
         return;
 
     target->window()->backend().setResizing(resizing);
+}
+
+static bool showsCommittedSize(const SP<ITarget>& target) {
+    const auto WINDOW = target ? target->window() : nullptr;
+    return validMapped(WINDOW) && !WINDOW->backend().isX11() && target->floating() && !Fullscreen::controller()->isFullscreen(WINDOW);
+}
+
+static std::optional<Vector2D> committedSize(const PHLWINDOW& window) {
+    const auto SURFACE = window->backend().surface();
+    if (!SURFACE || !SURFACE->m_current.texture)
+        return std::nullopt;
+
+    const auto BOX = window->backend().clientToLogical(window->backend().geometry().box, window->m_monitor.lock());
+    if (BOX.w < 1 || BOX.h < 1)
+        return std::nullopt;
+
+    return BOX.size();
+}
+
+static CBox anchoredBox(const CBox& requested, const Vector2D& size, eRectCorner corner) {
+    CBox box = {edgeLeft(corner) ? requested.x + requested.w - size.x : requested.x, edgeTop(corner) ? requested.y + requested.h - size.y : requested.y, size.x, size.y};
+    return box.round();
+}
+
+bool CDragStateController::showCommittedSize(const SP<ITarget>& target) {
+    const auto SIZE = committedSize(target->window());
+    if (!SIZE)
+        return false;
+
+    const auto BOX = anchoredBox(m_committedResize.requested, *SIZE, m_committedResize.corner);
+    if (BOX == target->position())
+        return false;
+
+    target->setPositionGlobal(BOX, TARGET_UPDATE_NO_CLIENT_CONFIGURE);
+    target->warpPositionSize();
+    m_committedResize.shown = target->position();
+    return true;
+}
+
+void CDragStateController::finishCommittedResize() {
+    const auto TARGET = m_committedResize.target.lock();
+    const auto SHOWN  = m_committedResize.shown;
+    const auto BOX    = m_committedResize.requested;
+    m_committedResize = {};
+
+    if (TARGET && showsCommittedSize(TARGET) && TARGET->position() == SHOWN && BOX != SHOWN) {
+        TARGET->setPositionGlobal(BOX, TARGET_UPDATE_NO_CLIENT_CONFIGURE);
+        TARGET->warpPositionSize();
+    }
+}
+
+std::optional<CBox> CDragStateController::committedResizeRequest(const ITarget* target) const {
+    const auto TARGET = m_committedResize.target.lock();
+    if (!TARGET || TARGET.get() != target || TARGET->position().size() != m_committedResize.shown.size())
+        return std::nullopt;
+
+    return m_committedResize.requested;
+}
+
+void CDragStateController::onWindowCommit(PHLWINDOW window) {
+    const auto TARGET = m_committedResize.target.lock();
+    if (!TARGET || TARGET->window() != window)
+        return;
+
+    if (!showsCommittedSize(TARGET) || TARGET->position().size() != m_committedResize.shown.size()) {
+        m_committedResize = {};
+        return;
+    }
+
+    if (const auto MOVED = TARGET->position().pos() - m_committedResize.shown.pos(); MOVED != Vector2D{}) {
+        m_committedResize.requested.translate(MOVED);
+        m_committedResize.shown.translate(MOVED);
+    }
+
+    showCommittedSize(TARGET);
+
+    const auto CONFIGURED = window->backend().logicalToClient(m_committedResize.requested, window->m_monitor.lock()).size();
+    if (m_target.lock() != TARGET && window->backend().reportedSize() == CONFIGURED)
+        m_committedResize = {};
 }
 
 SP<ITarget> CDragStateController::target() const {
@@ -163,6 +243,9 @@ bool CDragStateController::updateDragWindow() {
 
 void CDragStateController::dragBegin(SP<ITarget> target, eMouseBindMode mode, std::optional<eRectCorner> forcedEdge, bool exclusiveDeviceGrab) {
     s_maximizedRestoreWindow.reset();
+    if (m_committedResize.target.lock() != target || !isResizeMode(mode))
+        finishCommittedResize();
+
     m_target              = target;
     m_dragMode            = mode;
     m_draggingTiled       = false;
@@ -325,7 +408,19 @@ bool CDragStateController::dragEnd() {
 
     draggingTarget->damageEntire();
 
-    g_layoutManager->setTargetGeom(draggingTarget->position(), draggingTarget);
+    const bool SHOWS_COMMITTED = m_committedResize.target.lock() == draggingTarget && showsCommittedSize(draggingTarget);
+    g_layoutManager->setTargetGeom(SHOWS_COMMITTED ? m_committedResize.requested : draggingTarget->position(), draggingTarget);
+
+    if (SHOWS_COMMITTED) {
+        m_committedResize.requested = draggingTarget->position();
+        m_committedResize.shown     = draggingTarget->position();
+        showCommittedSize(draggingTarget);
+
+        const auto WINDOW = draggingTarget->window();
+        if (WINDOW->backend().reportedSize() == WINDOW->backend().logicalToClient(m_committedResize.requested, WINDOW->m_monitor.lock()).size())
+            m_committedResize = {};
+    } else if (m_committedResize.target.lock() == draggingTarget)
+        m_committedResize = {};
 
     Desktop::focusState()->fullWindowFocus(draggingTarget->window(), Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
 
@@ -486,8 +581,24 @@ void CDragStateController::mouseMove(const Vector2D& mousePos) {
             CBox wb = {newPos, newSize};
             wb.round();
 
-            DRAGGINGTARGET->setPositionGlobal(wb);
-            DRAGGINGTARGET->warpPositionSize();
+            if (showsCommittedSize(DRAGGINGTARGET)) {
+                if (m_committedResize.target.lock() != DRAGGINGTARGET) {
+                    finishCommittedResize();
+                    m_committedResize.target = DRAGGINGTARGET;
+                    m_committedResize.shown  = DRAGGINGTARGET->position();
+                }
+
+                m_committedResize.requested = wb;
+                m_committedResize.corner    = m_grabbedCorner;
+
+                const auto WINDOW = DRAGGINGTARGET->window();
+                WINDOW->backend().configure(wb, WINDOW->m_monitor.lock());
+                // A client that has already drawn this size gets no new commit.
+                showCommittedSize(DRAGGINGTARGET);
+            } else {
+                DRAGGINGTARGET->setPositionGlobal(wb);
+                DRAGGINGTARGET->warpPositionSize();
+            }
         } else {
             g_layoutManager->resizeTarget(TICKDELTA, DRAGGINGTARGET, m_grabbedCorner);
             DRAGGINGTARGET->warpPositionSize();

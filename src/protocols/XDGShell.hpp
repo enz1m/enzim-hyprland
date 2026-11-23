@@ -9,6 +9,7 @@
 #include "../helpers/math/Math.hpp"
 #include "../helpers/signal/Signal.hpp"
 #include "types/SurfaceRole.hpp"
+#include "types/QueuedGeometry.hpp"
 
 class CXDGWMBase;
 class CXDGPositionerResource;
@@ -236,6 +237,11 @@ class CXDGSurfaceResource {
         CHyprSignalListener surfaceDestroy;
         CHyprSignalListener surfaceCommit;
     } m_listeners;
+
+    CQueuedGeometry     m_queuedGeometry;
+    bool                m_directCommit = false;
+    CHyprSignalListener m_surfacePrecommit;
+    CHyprSignalListener m_surfaceStateCommit;
 
     friend class CXDGPopupResource;
     friend class CXDGToplevelResource;

@@ -572,8 +572,23 @@ CXDGSurfaceResource::CXDGSurfaceResource(SP<CXdgSurface> resource_, SP<CXDGWMBas
         m_events.destroy.emit();
     });
 
+    m_surfacePrecommit = m_surface->m_events.precommit.listen([this] {
+        // A null buffer is applied at once, without queueing.
+        m_directCommit = !m_surface->m_pending.buffer && m_surface->m_pending.updated.bits.buffer;
+    });
+
+    m_surfaceStateCommit = m_surface->m_events.stateCommit.listen([this](WP<SSurfaceState> state) {
+        m_directCommit = false;
+        m_queuedGeometry.push(state, m_pending.geometry);
+    });
+
     m_listeners.surfaceCommit = m_surface->m_events.commit.listen([this] {
         m_current = m_pending;
+        if (m_directCommit)
+            m_queuedGeometry.clear();
+        else if (const auto GEOMETRY = m_queuedGeometry.take())
+            m_current.geometry = *GEOMETRY;
+        m_directCommit = false;
         if (m_toplevel)
             m_toplevel->m_current = m_toplevel->m_pending;
 

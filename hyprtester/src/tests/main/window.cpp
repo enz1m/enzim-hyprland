@@ -1345,6 +1345,22 @@ TEST_CASE(monitorrule) {
     EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "HEADLESS-2");
 }
 
+// An interactive resize reports the size of the client's latest buffer until
+// the client commits the size it was configured for.
+static bool waitForFloatingGeometry(const std::string& at, const std::string& size) {
+    std::string clients;
+    for (size_t i = 0; i < 50; i++) {
+        clients = getFromSocket("/clients");
+        if (clients.contains(std::format("at: {}\n", at)) && clients.contains(std::format("size: {}\n", size)))
+            return true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    NLog::log("{}Expected at {} size {}, settled at {} size {}", Colors::RED, at, size, Tests::getAttribute(clients, "at"), Tests::getAttribute(clients, "size"));
+    return false;
+}
+
 TEST_CASE(mouseResize) {
 #define RESET_WINDOW()                                                                                                                                                             \
     OK(getFromSocket("r/reload"));                                                                                                                                                 \
@@ -1374,14 +1390,14 @@ TEST_CASE(mouseResize) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     OK(getFromSocket("/eval hl.plugin.test.click(273, 0)"));
-    EXPECT_CONTAINS(getFromSocket("/clients"), "size: 700,200");
+    EXPECT(waitForFloatingGeometry("0,0", "700,200"), true);
 
     RESET_WINDOW();
     OK(getFromSocket("r/eval hl.bind('mouse:273', hl.dsp.window.resize({ keep_aspect_ratio = true }), { mouse = true })"));
     OK(getFromSocket("/eval hl.plugin.test.click(273, 1)"));
     OK(getFromSocket("/dispatch hl.dsp.cursor.move({ x = 1280, y = 100 })"));
     OK(getFromSocket("/eval hl.plugin.test.click(273, 0)"));
-    EXPECT_CONTAINS(getFromSocket("/clients"), "size: 1280,800");
+    EXPECT(waitForFloatingGeometry("0,0", "1280,800"), true);
 
     RESET_WINDOW();
     OK(getFromSocket("/eval hl.window_rule({ match = { class = 'kitty' }, keep_aspect_ratio = true })"));
@@ -1389,7 +1405,7 @@ TEST_CASE(mouseResize) {
     OK(getFromSocket("/eval hl.plugin.test.click(273, 1)"));
     OK(getFromSocket("/dispatch hl.dsp.cursor.move({ x = 700, y = 200 })"));
     OK(getFromSocket("/eval hl.plugin.test.click(273, 0)"));
-    EXPECT_CONTAINS(getFromSocket("/clients"), "size: 700,200");
+    EXPECT(waitForFloatingGeometry("0,0", "700,200"), true);
 #undef RESET_WINDOW
 }
 
