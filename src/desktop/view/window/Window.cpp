@@ -1760,6 +1760,8 @@ void CWindow::commitWindow(bool initialCommit) {
     if (!m_isMapped || isHidden())
         return;
 
+    g_layoutManager->dragController()->onWindowCommit(m_self.lock());
+
     if (!m_backend->isX11() && !Fullscreen::controller()->isFullscreen(m_self.lock()) && m_target->floating()) {
         const auto HINTS = m_backend->geometryHints(eBackendState::BACKEND_STATE_CURRENT);
         if (clampWindowSize(HINTS.minSize, HINTS.maxSize))

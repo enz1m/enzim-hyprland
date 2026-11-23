@@ -39,6 +39,9 @@ namespace Layout::Supplementary {
 
         SP<ITarget> target() const;
 
+        void                onWindowCommit(PHLWINDOW window);
+        std::optional<CBox> committedResizeRequest(const ITarget* target) const;
+
         struct {
             CSignalT<> motion;
             CSignalT<> ended;
@@ -63,5 +66,16 @@ namespace Layout::Supplementary {
         Vector2D                           m_draggingWindowOriginalFloatSize;
         Layout::eRectCorner                m_grabbedCorner = sc<Layout::eRectCorner>(0) /* CORNER_NONE */;
         std::optional<Layout::eRectCorner> m_forcedGrabbedCorner;
+
+        // The requested box goes to the client while the shown box follows committed buffers.
+        struct {
+            WP<ITarget>         target;
+            CBox                requested;
+            CBox                shown;
+            Layout::eRectCorner corner = sc<Layout::eRectCorner>(0) /* CORNER_NONE */;
+        } m_committedResize;
+
+        bool showCommittedSize(const SP<ITarget>& target);
+        void finishCommittedResize();
     };
 };

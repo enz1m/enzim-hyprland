@@ -2,6 +2,7 @@
 #include "../../desktop/view/window/Window.hpp"
 #include "../../desktop/view/window/WindowPresentation.hpp"
 
+#include "../LayoutManager.hpp"
 #include "../space/Space.hpp"
 #include "../algorithm/Algorithm.hpp"
 
@@ -464,7 +465,12 @@ void CWindowTarget::sendWindowSize(bool force) {
     LOG(Log::TRACE, "sendWindowSize: window:{:x},title:{} with real pos {}, real size {} (force: {})", rc<uintptr_t>(m_window.get()), m_window->metadata().title(),
         m_window->position(Desktop::View::IGeometric::GEOMETRIC_GOAL), m_window->size(Desktop::View::IGeometric::GEOMETRIC_GOAL), force);
 
-    m_window->backend().configure(CBox{m_window->position(Desktop::View::IGeometric::GEOMETRIC_GOAL), m_window->size(Desktop::View::IGeometric::GEOMETRIC_GOAL)}, PMONITOR, force);
+    // An interactive resize shows the client's committed size, but the client
+    // keeps the size it was asked for.
+    const auto BOX = g_layoutManager->dragController()->committedResizeRequest(this).value_or(
+        CBox{m_window->position(Desktop::View::IGeometric::GEOMETRIC_GOAL), m_window->size(Desktop::View::IGeometric::GEOMETRIC_GOAL)});
+
+    m_window->backend().configure(BOX, PMONITOR, force);
 }
 
 void CWindowTarget::damageEntire() {
