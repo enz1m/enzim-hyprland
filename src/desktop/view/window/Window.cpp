@@ -46,6 +46,8 @@
 #include "../../../managers/TokenManager.hpp"
 #include "../../../animation/AnimationManager.hpp"
 #include "../../../managers/ANRManager.hpp"
+#include "../../../managers/SeatManager.hpp"
+#include "../../../managers/SessionLockManager.hpp"
 #include "../../../managers/eventLoop/EventLoopManager.hpp"
 #include "../../../managers/eventLoop/EventLoopTimer.hpp"
 #include "../../../protocols/core/Compositor.hpp"
@@ -801,6 +803,14 @@ std::unordered_map<std::string, std::string> CWindow::getEnv() {
 }
 
 void CWindow::activate(bool force) {
+    activateWithPolicy(force, false);
+}
+
+void CWindow::activateFromUserInput() {
+    activateWithPolicy(false, true);
+}
+
+void CWindow::activateWithPolicy(bool force, bool userInput) {
     if (Desktop::focusState()->window() == m_self)
         return;
 
@@ -811,7 +821,7 @@ void CWindow::activate(bool force) {
     IPC::Socket2::sock()->postEvent({.event = "urgent", .data = std::format("{:x}", rc<uintptr_t>(this))});
     Event::bus()->m_events.window.urgent.emit(m_self.lock());
 
-    if (!force && (!m_ruleApplicator->focusOnActivate().valueOr(*PFOCUSONACTIVATE) || m_requestSuppression.activateFocusOnly || m_requestSuppression.activate))
+    if (!force && (!m_ruleApplicator->focusOnActivate().valueOr(userInput || *PFOCUSONACTIVATE) || m_requestSuppression.activateFocusOnly || m_requestSuppression.activate))
         return;
 
     if (!m_isMapped) {
@@ -819,11 +829,17 @@ void CWindow::activate(bool force) {
         return;
     }
 
+    if (userInput &&
+        (g_pSessionLockManager->isSessionLocked() || !g_pInputManager->m_exclusiveKeyboardLSes.empty() || m_ruleApplicator->noFocus().valueOrDefault() ||
+         (g_pSeatManager->m_seatGrab && !g_pSeatManager->m_seatGrab->accepts(wlSurface()->resource()))))
+        return;
+
     if (m_target->floating())
         Desktop::windowState()->raise(m_self.lock());
 
     Desktop::focusState()->fullWindowFocus(m_self.lock(), FOCUS_REASON_DESKTOP_STATE_CHANGE);
-    warpCursor();
+    if (!userInput || Desktop::focusState()->window() == m_self)
+        warpCursor();
 }
 
 void CWindow::onUpdateState(const SBackendStateRequest& request) {

@@ -215,6 +215,7 @@ namespace Desktop::View {
         bool                       onSpecialWorkspace();
         const std::string&         workspaceAddress() const;
         void                       activate(bool force = false);
+        void                       activateFromUserInput();
         bool                       clampWindowSize(const std::optional<Vector2D> minSize, const std::optional<Vector2D> maxSize);
         float                      getScrollMouse();
         float                      getScrollTouchpad();
@@ -256,6 +257,7 @@ namespace Desktop::View {
         PHLWINDOWREF m_self;
 
       private:
+        void         activateWithPolicy(bool force, bool userInput);
         void         initialize();
         void         attachBackendListeners();
         void         mapWindow();

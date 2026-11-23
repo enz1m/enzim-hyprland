@@ -48,6 +48,7 @@ class CWLTouchResource {
 
     bool                good();
     void                sendDown(SP<CWLSurfaceResource> surface, uint32_t timeMs, int32_t id, const Vector2D& local);
+    void                sendDown(SP<CWLSurfaceResource> surface, uint32_t timeMs, int32_t id, const Vector2D& local, bool userPress);
     void                sendUp(uint32_t timeMs, int32_t id);
     void                sendMotion(uint32_t timeMs, int32_t id, const Vector2D& local);
     void                sendFrame();
@@ -79,6 +80,7 @@ class CWLPointerResource {
     void                sendLeave();
     void                sendMotion(uint32_t timeMs, const Vector2D& local);
     void                sendButton(uint32_t timeMs, uint32_t button, wl_pointer_button_state state);
+    void                sendButton(uint32_t timeMs, uint32_t button, wl_pointer_button_state state, bool userPress);
     void                sendAxis(uint32_t timeMs, wl_pointer_axis axis, double value);
     void                sendFrame();
     void                sendAxisSource(wl_pointer_axis_source source);
@@ -121,6 +123,7 @@ class CWLKeyboardResource {
     void                sendEnter(SP<CWLSurfaceResource> surface, wl_array* keys);
     void                sendLeave();
     void                sendKey(uint32_t timeMs, uint32_t key, wl_keyboard_key_state state);
+    void                sendKey(uint32_t timeMs, uint32_t key, wl_keyboard_key_state state, bool userPress);
     void                sendMods(uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group);
     void                repeatInfo(uint32_t rate, uint32_t delayMs);
 

@@ -1,6 +1,7 @@
 #include "InputManager.hpp"
 #include "../SessionLockManager.hpp"
 #include "../../protocols/SessionLock.hpp"
+#include "../../protocols/XDGActivation.hpp"
 #include "../../Compositor.hpp"
 #include "../../desktop/view/LayerSurface.hpp"
 #include "../../desktop/state/FocusState.hpp"
@@ -15,7 +16,10 @@
 #include "UnifiedWorkspaceSwipeGesture.hpp"
 
 void CInputManager::onTouchDown(ITouch::SDownEvent e) {
-    m_lastInputTouch = true;
+    m_lastInputTouch      = true;
+    const bool USER_PRESS = !e.device->isVirtual();
+    if (USER_PRESS)
+        PROTO::activation->invalidateInput();
 
     static auto PSWIPETOUCH  = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_touch");
     static auto PGAPSOUTDATA = CConfigValue<Config::IComplexConfigValue>("general:gaps_out");
@@ -114,7 +118,7 @@ void CInputManager::onTouchDown(ITouch::SDownEvent e) {
     } else
         return; // oops, nothing found.
 
-    g_pSeatManager->sendTouchDown(m_touchData.touchFocusSurface.lock(), e.timeMs, e.touchID, local);
+    g_pSeatManager->sendTouchDown(m_touchData.touchFocusSurface.lock(), e.timeMs, e.touchID, local, USER_PRESS);
 }
 
 void CInputManager::onTouchUp(ITouch::SUpEvent e) {

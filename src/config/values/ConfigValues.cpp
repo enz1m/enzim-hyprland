@@ -576,7 +576,7 @@ std::vector<SP<IValue>> Values::getConfigValues() {
         MS<Bool>("misc:enable_swallow", "Enable window swallowing", false),
         MS<String>("misc:swallow_regex", "The class regex to be used for windows that should be swallowed.", STRVAL_EMPTY),
         MS<String>("misc:swallow_exception_regex", "The title regex to be used for windows that should not be swallowed.", STRVAL_EMPTY),
-        MS<Bool>("misc:focus_on_activate", "Whether Hyprland should focus an app that requests to be focused.", false),
+        MS<Bool>("misc:focus_on_activate", "Whether to focus apps requesting activation without a validated user gesture.", false),
         MS<Bool>("misc:mouse_move_focuses_monitor", "Whether mouse moving into a different monitor should focus it", true),
         MS<Bool>("misc:allow_session_lock_restore", "if true, will allow you to restart a lockscreen app in case it crashes.", false),
         MS<Bool>("misc:session_lock_xray", "keep rendering workspaces below your lockscreen", false),

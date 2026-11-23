@@ -4,6 +4,10 @@
 #include <cstdint>
 #include "WaylandProtocol.hpp"
 #include "xdg-activation-v1.hpp"
+#include "../helpers/time/Time.hpp"
+
+class CWLSeatResource;
+class CWLSurfaceResource;
 
 class CXDGActivationToken {
   public:
@@ -15,8 +19,9 @@ class CXDGActivationToken {
   private:
     SP<CXdgActivationTokenV1> m_resource;
 
-    uint32_t                  m_serial    = 0;
-    std::string               m_appID     = "";
+    uint32_t                  m_serial = 0;
+    WP<CWLSeatResource>       m_seat;
+    WP<CWLSurfaceResource>    m_surface;
     bool                      m_committed = false;
 
     std::string               m_token = "";
@@ -30,10 +35,24 @@ class CXDGActivationProtocol : public IWaylandProtocol {
 
     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
 
+    void         invalidateInput();
+    void         recordInputSerial(SP<CWLSeatResource> seat, uint32_t serial, SP<CWLSurfaceResource> surface);
+
   private:
     void onManagerResourceDestroy(wl_resource* res);
     void destroyToken(CXDGActivationToken* pointer);
     void onGetToken(CXdgActivationV1* pMgr, uint32_t id);
+    bool consumeInputSerial(SP<CWLSeatResource> seat, uint32_t serial, SP<CWLSurfaceResource> surface);
+
+    struct SInputSerial {
+        uint32_t               serial = 0;
+        WP<CWLSeatResource>    seat;
+        WP<CWLSurfaceResource> surface;
+    };
+    std::vector<SInputSerial> m_inputSerials;
+    Time::steady_tp           m_inputTime;
+    std::string               m_userToken;
+    WP<CWLSurfaceResource>    m_userSource;
 
     struct SSentToken {
         std::string token;

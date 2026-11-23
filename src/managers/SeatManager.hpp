@@ -82,6 +82,7 @@ class CSeatManager {
 
     void                       setKeyboardFocus(SP<CWLSurfaceResource> surf);
     void                       sendKeyboardKey(uint32_t timeMs, uint32_t key, wl_keyboard_key_state state);
+    void                       sendKeyboardKey(uint32_t timeMs, uint32_t key, wl_keyboard_key_state state, bool userPress);
     void                       sendKeyboardMods(uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group);
 
     CKeyboardEventHandlerStack m_keyboardEventHandlers;
@@ -89,12 +90,14 @@ class CSeatManager {
     void                       setPointerFocus(SP<CWLSurfaceResource> surf, const Vector2D& local);
     void                       sendPointerMotion(uint32_t timeMs, const Vector2D& local);
     void                       sendPointerButton(uint32_t timeMs, uint32_t key, wl_pointer_button_state state);
+    void                       sendPointerButton(uint32_t timeMs, uint32_t button, wl_pointer_button_state state, bool userPress);
     void                       sendPointerFrame();
     void                       sendPointerFrame(WP<CWLSeatResource> pResource);
     void                       sendPointerAxis(uint32_t timeMs, wl_pointer_axis axis, double value, int32_t discrete, int32_t value120, wl_pointer_axis_source source,
                                                wl_pointer_axis_relative_direction relative);
 
     void                       sendTouchDown(SP<CWLSurfaceResource> surf, uint32_t timeMs, int32_t id, const Vector2D& local);
+    void                       sendTouchDown(SP<CWLSurfaceResource> surface, uint32_t timeMs, int32_t id, const Vector2D& local, bool userPress);
     void                       sendTouchUp(uint32_t timeMs, int32_t id);
     void                       sendTouchMotion(uint32_t timeMs, int32_t id, const Vector2D& local);
     void                       sendTouchFrame();

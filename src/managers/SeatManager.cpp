@@ -7,6 +7,7 @@
 #include "../protocols/core/Compositor.hpp"
 #include "../protocols/LayerShell.hpp"
 #include "../protocols/InputCapture.hpp"
+#include "../protocols/XDGActivation.hpp"
 #include "../Compositor.hpp"
 #include "../desktop/state/FocusState.hpp"
 #include "../devices/IKeyboard.hpp"
@@ -245,6 +246,7 @@ void CSeatManager::setKeyboardFocus(SP<CWLSurfaceResource> surf) {
         return;
     }
 
+    PROTO::activation->invalidateInput();
     m_listeners.keyboardSurfaceDestroy.reset();
 
     // Don't gate leave on m_state.keyboardFocusResource — the WP can
@@ -310,6 +312,10 @@ void CSeatManager::setKeyboardFocus(SP<CWLSurfaceResource> surf) {
 }
 
 void CSeatManager::sendKeyboardKey(uint32_t timeMs, uint32_t key, wl_keyboard_key_state state_) {
+    sendKeyboardKey(timeMs, key, state_, false);
+}
+
+void CSeatManager::sendKeyboardKey(uint32_t timeMs, uint32_t key, wl_keyboard_key_state state_, bool userPress) {
     if (!m_state.keyboardFocusResource)
         return;
 
@@ -321,7 +327,7 @@ void CSeatManager::sendKeyboardKey(uint32_t timeMs, uint32_t key, wl_keyboard_ke
             if (!k)
                 continue;
 
-            k->sendKey(timeMs, key, state_);
+            k->sendKey(timeMs, key, state_, userPress);
         }
     }
 }
@@ -431,6 +437,10 @@ void CSeatManager::sendPointerMotion(uint32_t timeMs, const Vector2D& local) {
 }
 
 void CSeatManager::sendPointerButton(uint32_t timeMs, uint32_t key, wl_pointer_button_state state_) {
+    sendPointerButton(timeMs, key, state_, false);
+}
+
+void CSeatManager::sendPointerButton(uint32_t timeMs, uint32_t key, wl_pointer_button_state state_, bool userPress) {
     if (!m_state.pointerFocusResource || (PROTO::data && PROTO::data->dndActive()))
         return;
 
@@ -442,7 +452,7 @@ void CSeatManager::sendPointerButton(uint32_t timeMs, uint32_t key, wl_pointer_b
             if (!p)
                 continue;
 
-            p->sendButton(timeMs, key, state_);
+            p->sendButton(timeMs, key, state_, userPress);
         }
     }
 }
@@ -500,6 +510,10 @@ void CSeatManager::sendPointerAxis(uint32_t timeMs, wl_pointer_axis axis, double
 }
 
 void CSeatManager::sendTouchDown(SP<CWLSurfaceResource> surf, uint32_t timeMs, int32_t id, const Vector2D& local) {
+    sendTouchDown(surf, timeMs, id, local, false);
+}
+
+void CSeatManager::sendTouchDown(SP<CWLSurfaceResource> surf, uint32_t timeMs, int32_t id, const Vector2D& local, bool userPress) {
     m_listeners.touchSurfaceDestroy.reset();
 
     m_state.touchFocusResource.reset();
@@ -515,7 +529,7 @@ void CSeatManager::sendTouchDown(SP<CWLSurfaceResource> surf, uint32_t timeMs, i
             if (!t)
                 continue;
 
-            t->sendDown(surf, timeMs, id, local);
+            t->sendDown(surf, timeMs, id, local, userPress);
         }
     }
 

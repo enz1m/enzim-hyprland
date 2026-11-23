@@ -1,6 +1,7 @@
 #include "Seat.hpp"
 #include "Compositor.hpp"
 #include "DataDevice.hpp"
+#include "../XDGActivation.hpp"
 #include "../../devices/IKeyboard.hpp"
 #include "../../devices/IHID.hpp"
 #include "../../managers/SeatManager.hpp"
@@ -25,6 +26,10 @@ bool CWLTouchResource::good() {
 }
 
 void CWLTouchResource::sendDown(SP<CWLSurfaceResource> surface, uint32_t timeMs, int32_t id, const Vector2D& local) {
+    sendDown(surface, timeMs, id, local, false);
+}
+
+void CWLTouchResource::sendDown(SP<CWLSurfaceResource> surface, uint32_t timeMs, int32_t id, const Vector2D& local, bool userPress) {
     if (!m_owner || !surface || !surface->getResource()->resource())
         return;
 
@@ -36,7 +41,11 @@ void CWLTouchResource::sendDown(SP<CWLSurfaceResource> surface, uint32_t timeMs,
     m_currentSurface           = surface;
     m_listeners.destroySurface = surface->m_events.destroy.listen([this, timeMs, id] { sendUp(timeMs + 10 /* hack */, id); });
 
-    m_resource->sendDown(g_pSeatManager->nextSerial(m_owner.lock()), timeMs, surface->getResource().get(), id, wl_fixed_from_double(local.x), wl_fixed_from_double(local.y));
+    const auto SERIAL = g_pSeatManager->nextSerial(m_owner.lock());
+    if (userPress)
+        PROTO::activation->recordInputSerial(m_owner.lock(), SERIAL, surface);
+
+    m_resource->sendDown(SERIAL, timeMs, surface->getResource().get(), id, wl_fixed_from_double(local.x), wl_fixed_from_double(local.y));
 
     m_fingers++;
 }
@@ -217,6 +226,10 @@ void CWLPointerResource::sendMotion(uint32_t timeMs, const Vector2D& local) {
 }
 
 void CWLPointerResource::sendButton(uint32_t timeMs, uint32_t button, wl_pointer_button_state state) {
+    sendButton(timeMs, button, state, false);
+}
+
+void CWLPointerResource::sendButton(uint32_t timeMs, uint32_t button, wl_pointer_button_state state, bool userPress) {
     if (!m_owner || !m_currentSurface)
         return;
 
@@ -243,6 +256,9 @@ void CWLPointerResource::sendButton(uint32_t timeMs, uint32_t button, wl_pointer
 
     if (state == WL_POINTER_BUTTON_STATE_PRESSED)
         g_pSeatManager->recordPointerButtonSerial(m_owner.lock(), SERIAL, m_currentSurface.lock(), button);
+
+    if (userPress)
+        PROTO::activation->recordInputSerial(m_owner.lock(), SERIAL, m_currentSurface.lock());
 
     m_resource->sendButton(SERIAL, timeMs, button, state);
 }
@@ -421,13 +437,21 @@ void CWLKeyboardResource::sendLeave() {
 }
 
 void CWLKeyboardResource::sendKey(uint32_t timeMs, uint32_t key, wl_keyboard_key_state state) {
+    sendKey(timeMs, key, state, false);
+}
+
+void CWLKeyboardResource::sendKey(uint32_t timeMs, uint32_t key, wl_keyboard_key_state state, bool userPress) {
     if (!m_owner || !m_currentSurface)
         return;
 
     if (!(PROTO::seat->m_currentCaps & eHIDCapabilityType::HID_INPUT_CAPABILITY_KEYBOARD))
         return;
 
-    m_resource->sendKey(g_pSeatManager->nextSerial(m_owner.lock()), timeMs, key, state);
+    const auto SERIAL = g_pSeatManager->nextSerial(m_owner.lock());
+    if (userPress)
+        PROTO::activation->recordInputSerial(m_owner.lock(), SERIAL, m_currentSurface.lock());
+
+    m_resource->sendKey(SERIAL, timeMs, key, state);
 }
 
 void CWLKeyboardResource::sendMods(uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group) {

@@ -28,6 +28,7 @@
 #include "../../protocols/core/DataDevice.hpp"
 #include "../../protocols/core/Compositor.hpp"
 #include "../../protocols/InputCapture.hpp"
+#include "../../protocols/XDGActivation.hpp"
 
 #include "../../devices/Mouse.hpp"
 #include "../../devices/VirtualPointer.hpp"
@@ -737,7 +738,14 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus, bool mouse, st
     }
 }
 
+static bool isUserPress(const IPointer::SButtonEvent& event, const SP<IPointer>& pointer) {
+    return pointer && !pointer->isVirtual() && event.state == WL_POINTER_BUTTON_STATE_PRESSED;
+}
+
 void CInputManager::onMouseButton(IPointer::SButtonEvent e, SP<IPointer> mouse) {
+    if (isUserPress(e, mouse))
+        PROTO::activation->invalidateInput();
+
     Event::SCallbackInfo info;
     Event::bus()->m_events.input.mouse.button.emit(e, info);
     if (info.cancelled)
@@ -929,7 +937,7 @@ void CInputManager::processMouseDownNormal(const IPointer::SButtonEvent& e, SP<I
     }
 
     // notify app if we didn't handle it
-    g_pSeatManager->sendPointerButton(e.timeMs, e.button, e.state);
+    g_pSeatManager->sendPointerButton(e.timeMs, e.button, e.state, isUserPress(e, mouse));
 
     if (const auto PMON = State::monitorState()->query().vec(mouseCoords).run(); PMON != Desktop::focusState()->monitor() && PMON)
         Desktop::focusState()->rawMonitorFocus(PMON);
@@ -1702,6 +1710,10 @@ void CInputManager::onKeyboardKey(const IKeyboard::SKeyEvent& event, SP<IKeyboar
     if (!pKeyboard->m_enabled || !pKeyboard->m_allowed)
         return;
 
+    const bool USER_PRESS = !pKeyboard->isVirtual() && event.state == WL_KEYBOARD_KEY_STATE_PRESSED;
+    if (USER_PRESS)
+        PROTO::activation->invalidateInput();
+
     const bool           DISALLOWACTION = pKeyboard->isVirtual() && shouldIgnoreVirtualKeyboard(pKeyboard);
 
     const auto           IME    = m_relay.m_inputMethod.lock();
@@ -1762,7 +1774,7 @@ void CInputManager::onKeyboardKey(const IKeyboard::SKeyEvent& event, SP<IKeyboar
             m_pressed.emplace_back(event.keycode);
 
         g_pSeatManager->setKeyboard(pKeyboard);
-        g_pSeatManager->sendKeyboardKey(event.timeMs, event.keycode, state);
+        g_pSeatManager->sendKeyboardKey(event.timeMs, event.keycode, state, USER_PRESS);
     }
 
     updateKeyboardsLeds(pKeyboard);

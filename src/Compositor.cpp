@@ -18,6 +18,7 @@
 #include "managers/TokenManager.hpp"
 #include "pointer/PointerManager.hpp"
 #include "managers/SeatManager.hpp"
+#include "protocols/XDGActivation.hpp"
 #include "managers/VersionKeeperManager.hpp"
 #include "managers/DonationNagManager.hpp"
 #include "managers/ANRManager.hpp"
@@ -437,6 +438,7 @@ void CCompositor::initServer(std::string socketName, int socketFd) {
     initManagers(STAGE_LATE);
 
     m_listeners.lock = g_pSessionLockManager->m_events.lock.listen([this] {
+        PROTO::activation->invalidateInput();
         static int lock_count = 0;
         // lock_count used to avoid triggering condition on initial forceLock()
         if (m_startLocked && lock_count >= 1) {
