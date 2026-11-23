@@ -28,12 +28,11 @@ CToplevelExportClient::CToplevelExportClient(SP<CHyprlandToplevelExportManagerV1
 }
 
 void CToplevelExportClient::captureToplevel(uint32_t frame, int32_t overlayCursor_, PHLWINDOW handle) {
-    if UNLIKELY (!handle) {
+    WP<CScreenshareSession> session;
+    if UNLIKELY (!handle)
         LOG(Log::ERR, "Couldn't capture (window doesn't exist)");
-        return;
-    }
-
-    auto session = Screenshare::mgr()->getManagedSession(m_resource->client(), handle);
+    else
+        session = Screenshare::mgr()->getManagedSession(m_resource->client(), handle);
 
     // create a frame
     const auto FRAME = PROTO::toplevelExport->m_frames.emplace_back(
@@ -62,6 +61,11 @@ CToplevelExportFrame::CToplevelExportFrame(SP<CHyprlandToplevelExportFrameV1> re
     m_resource->setOnDestroy([this](CHyprlandToplevelExportFrameV1* pFrame) { PROTO::toplevelExport->destroyResource(this); });
     m_resource->setDestroy([this](CHyprlandToplevelExportFrameV1* pFrame) { PROTO::toplevelExport->destroyResource(this); });
     m_resource->setCopy([this](CHyprlandToplevelExportFrameV1* pFrame, wl_resource* res, int32_t ignoreDamage) { shareFrame(res, !!ignoreDamage); });
+
+    if UNLIKELY (!m_session) {
+        m_resource->sendFailed();
+        return;
+    }
 
     m_frame = m_session->nextFrame(overlayCursor);
 

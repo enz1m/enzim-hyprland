@@ -25,8 +25,14 @@ CScreenshareSession::CScreenshareSession(PHLWINDOW window, wl_client* client) : 
         m_events.constraintsChanged.emit();
     });
     m_listeners.windowMonitorChanged = m_window->m_events.monitorChanged.listen([this]() {
-        m_listeners.monitorDestroyed   = monitor()->m_events.disconnect.listen([this]() { stop(); });
-        m_listeners.monitorModeChanged = monitor()->m_events.modeChanged.listen([this]() {
+        const auto PMONITOR = monitor();
+        if (!PMONITOR) {
+            stop();
+            return;
+        }
+
+        m_listeners.monitorDestroyed   = PMONITOR->m_events.disconnect.listen([this]() { stop(); });
+        m_listeners.monitorModeChanged = PMONITOR->m_events.modeChanged.listen([this]() {
             calculateConstraints();
             m_events.constraintsChanged.emit();
         });
@@ -80,12 +86,19 @@ void CScreenshareSession::init() {
     if (g_pEventLoopManager)
         g_pEventLoopManager->addTimer(m_shareStopTimer);
 
+    // A window that has never been mapped has no monitor yet.
+    const auto PMONITOR = monitor();
+    if (!PMONITOR) {
+        stop();
+        return;
+    }
+
     // scale capture box since it's in logical coords; round to integer pixel
     // dims so m_bufferSize matches the int32 size we send to the client
-    m_captureBox.scale(monitor()->m_scale).round();
+    m_captureBox.scale(PMONITOR->m_scale).round();
 
-    m_listeners.monitorDestroyed   = monitor()->m_events.disconnect.listen([this]() { stop(); });
-    m_listeners.monitorModeChanged = monitor()->m_events.modeChanged.listen([this]() {
+    m_listeners.monitorDestroyed   = PMONITOR->m_events.disconnect.listen([this]() { stop(); });
+    m_listeners.monitorModeChanged = PMONITOR->m_events.modeChanged.listen([this]() {
         calculateConstraints();
         m_events.constraintsChanged.emit();
     });
