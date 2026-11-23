@@ -571,8 +571,12 @@ CXDGSurfaceResource::CXDGSurfaceResource(SP<CXdgSurface> resource_, SP<CXDGWMBas
     });
 
     m_surfacePrecommit = m_surface->m_events.precommit.listen([this] {
-        // A null buffer is applied at once, without queueing.
         m_directCommit = !m_surface->m_pending.buffer && m_surface->m_pending.updated.bits.buffer;
+        if (m_directCommit && m_mapped) {
+            // Close snapshots need the attached texture until the null buffer is applied.
+            m_mapped = false;
+            m_events.unmap.emit();
+        }
     });
 
     m_surfaceStateCommit = m_surface->m_events.stateCommit.listen([this](WP<SSurfaceState> state) {
@@ -606,9 +610,11 @@ CXDGSurfaceResource::CXDGSurfaceResource(SP<CXdgSurface> resource_, SP<CXDGWMBas
             return;
         }
 
-        if (!m_surface->m_current.texture && m_mapped) {
-            m_mapped = false;
-            m_events.unmap.emit();
+        if (!m_surface->m_current.texture && m_surface->m_mapped) {
+            if (m_mapped) {
+                m_mapped = false;
+                m_events.unmap.emit();
+            }
             m_surface->unmap();
             return;
         }
