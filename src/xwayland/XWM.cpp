@@ -209,6 +209,8 @@ std::string CXWM::getAtomName(uint32_t atom) {
     return {name, name_len};
 }
 
+std::string enzuiAdmitAppId(const wl_client* client, std::string id);
+
 void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_reply_t* reply) {
     std::string propName;
     if (Env::isTrace())
@@ -224,6 +226,7 @@ void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_
 
         if (!XSURF->m_state.appid.empty())
             XSURF->m_state.appid.pop_back();
+        XSURF->m_state.appid = enzuiAdmitAppId(nullptr, std::move(XSURF->m_state.appid));
         XSURF->m_events.metadataChanged.emit();
     };
 

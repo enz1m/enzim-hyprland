@@ -21,6 +21,8 @@
 #include <cstddef>
 #include <ranges>
 
+std::string enzuiAdmitAppId(const wl_client* client, std::string id);
+
 static bool xdgToplevelResizeEdgeValid(xdgToplevelResizeEdge edges) {
     switch (edges) {
         case XDG_TOPLEVEL_RESIZE_EDGE_NONE:
@@ -193,7 +195,7 @@ CXDGToplevelResource::CXDGToplevelResource(SP<CXdgToplevel> resource_, SP<CXDGSu
     });
 
     m_resource->setSetAppId([this](CXdgToplevel* r, const char* id) {
-        m_state.appid = id;
+        m_state.appid = enzuiAdmitAppId(r->client(), id);
         m_events.metadataChanged.emit();
     });
 
