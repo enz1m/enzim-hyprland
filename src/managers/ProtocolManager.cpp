@@ -421,13 +421,14 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 // A session lock disconnects every admitted client but the shell and input
 // methods, and while locked nothing else is admitted.
 //
-// Compositor control requests need the same kind of identity: see
-// controlAllowed.
+// Compositor control requests and dev.enzui.* application ids need the same
+// kind of identity: see controlAllowed and enzuiAdmitAppId.
 #include "SessionLockManager.hpp"
 #include "../ipc/s1/S1.hpp"
 #include <sys/stat.h>
 #include <dirent.h>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -867,6 +868,28 @@ namespace EnzuiAdmission {
         return allowed && unchanged(owner, proc);
     }
 
+    // An executable installed beside the registered shell executable.
+    static bool shellBinary(pid_t pid) {
+        const auto& shell = setting("ENZUI_SHELL_EXE");
+        const auto  slash = shell.rfind('/');
+        if (slash == std::string::npos || slash == 0)
+            return false;
+        std::error_code error;
+        const auto      image = std::filesystem::read_symlink("/proc/" + std::to_string(pid) + "/exe", error).filename().string();
+        return !error && !image.empty() && exeIs(pid, shell.substr(0, slash + 1) + image);
+    }
+
+    static bool appIdAllowed(const wl_client* client) {
+        if (!client)
+            return false;
+        auto  owner = peer(wl_client_get_fd(const_cast<wl_client*>(client)));
+        SProc proc;
+        if (owner.pid <= 0 || !readProc(owner.pid, proc))
+            return false;
+        const bool allowed = claimShell(owner.pid, proc.start, owner.handle.get()) || (!injected(owner.pid) && shellBinary(owner.pid));
+        return allowed && unchanged(owner, proc);
+    }
+
     static std::string command(const IPC::Socket1::SRequest& request) {
         const pid_t pid = request.pid;
         SProc       proc;
@@ -931,6 +954,13 @@ bool enzuiAllowsControl() {
         return true;
     LOG(Log::DEBUG, "enzUI admission: refused a control request from pid {}", EnzuiAdmission::controlPeer->pid);
     return false;
+}
+
+std::string enzuiAdmitAppId(const wl_client* client, std::string id) {
+    if (!EnzuiAdmission::enforcing() || !id.starts_with("dev.enzui.") || EnzuiAdmission::appIdAllowed(client))
+        return id;
+    LOG(Log::DEBUG, "enzUI admission: ignoring the shell application id {} from an unverified client", id);
+    return "";
 }
 
 void enzuiRevokePrivileged() {
