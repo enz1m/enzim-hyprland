@@ -419,6 +419,9 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 // identity is the inode of /proc/PID/exe, never a name; LD_PRELOAD and
 // LD_AUDIT disqualify. A session lock disconnects every admitted client but
 // the shell, and while locked nothing else is admitted.
+//
+// Compositor control requests need the same kind of identity: see
+// controlAllowed.
 #include "SessionLockManager.hpp"
 #include "../ipc/s1/S1.hpp"
 #include <sys/stat.h>
@@ -441,9 +444,9 @@ namespace EnzuiAdmission {
     static const std::string& setting(const char* name) {
         static const std::unordered_map<std::string, std::string> STARTUP = [] {
             std::unordered_map<std::string, std::string> values;
-            for (const auto* key : {"ENZUI_PRIVILEGED_CLIENTS", "ENZUI_SHELL_EXE", "ENZUI_SHELL_LAUNCHER_PID", "ENZUI_SHELL_LAUNCHER_START",
-                                    "ENZUI_SHELL_LAUNCHER_FD", "ENZUI_PORTAL_EXES", "ENZUI_PORTAL_INPUT_EXES", "ENZUI_PORTAL_HELPER_EXES",
-                                    "ENZUI_DEV_PRIVILEGED_EXES", "LD_LIBRARY_PATH"})
+            for (const auto* key :
+                 {"ENZUI_PRIVILEGED_CLIENTS", "ENZUI_SHELL_EXE", "ENZUI_SHELL_LAUNCHER_PID", "ENZUI_SHELL_LAUNCHER_START", "ENZUI_SHELL_LAUNCHER_FD", "ENZUI_PORTAL_EXES",
+                  "ENZUI_PORTAL_INPUT_EXES", "ENZUI_PORTAL_HELPER_EXES", "ENZUI_DEV_PRIVILEGED_EXES", "ENZUI_CONTROL_EXES", "LD_LIBRARY_PATH"})
                 values.emplace(key, getenv(key) ? getenv(key) : "");
             return values;
         }();
@@ -820,6 +823,41 @@ namespace EnzuiAdmission {
         return owner.pid > 0 && readProc(owner.pid, proc) && claimShell(owner.pid, proc.start, owner.handle.get());
     }
 
+    static bool unchanged(const SPeer& owner, const SProc& proc) {
+        SProc current;
+        return pidfdAlive(owner.handle.get()) && readProc(owner.pid, current) && current.start == proc.start && current.ppid == proc.ppid;
+    }
+
+    // The supervisor's own control commands come from itself or its descendants
+    // outside the shell's and the compositor's process trees.
+    static bool supervised(pid_t pid, SProc proc) {
+        const auto& parent = launcher();
+        if (!parent.pid || !pidfdAlive(parent.handle.get()) || !alive(parent.pid, parent.start))
+            return false;
+        if (pid == parent.pid)
+            return proc.start == parent.start;
+        for (int depth = 0; depth < 4; ++depth) {
+            if (proc.ppid == parent.pid)
+                return true;
+            const pid_t ancestor = proc.ppid;
+            SProc       next;
+            if (ancestor <= 1 || ancestor == shellPid || ancestor == getpid() || !readProc(ancestor, next) || next.start > proc.start ||
+                exeIs(ancestor, setting("ENZUI_SHELL_EXE")))
+                return false;
+            proc = next;
+        }
+        return false;
+    }
+
+    static bool controlAllowed(const SPeer& owner) {
+        SProc proc;
+        if (owner.pid <= 0 || !readProc(owner.pid, proc))
+            return false;
+        const bool allowed = claimShell(owner.pid, proc.start, owner.handle.get()) || supervised(owner.pid, proc) ||
+            (!injected(owner.pid) && (exeInList(owner.pid, "ENZUI_CONTROL_EXES") || exeInList(owner.pid, "ENZUI_DEV_PRIVILEGED_EXES")));
+        return allowed && unchanged(owner, proc);
+    }
+
     static std::string command(const IPC::Socket1::SRequest& request) {
         const pid_t pid = request.pid;
         SProc       proc;
@@ -874,6 +912,15 @@ bool enzuiAllowsGlobal(const wl_client* client, const wl_global* global) {
     if (g_pSessionLockManager && g_pSessionLockManager->isSessionLocked() && !EnzuiAdmission::isShell(client))
         return false;
     return EnzuiAdmission::decide(client) & kind;
+}
+
+bool enzuiAllowsControl() {
+    if (!EnzuiAdmission::enforcing() || !EnzuiAdmission::controlPeer)
+        return true;
+    if (EnzuiAdmission::controlAllowed(*EnzuiAdmission::controlPeer))
+        return true;
+    LOG(Log::DEBUG, "enzUI admission: refused a control request from pid {}", EnzuiAdmission::controlPeer->pid);
+    return false;
 }
 
 void enzuiRevokePrivileged() {
