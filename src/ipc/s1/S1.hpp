@@ -52,6 +52,8 @@ namespace IPC::Socket1 {
         std::string                               name;
         eCommandMatch                             match = COMMAND_MATCH_EXACT;
         std::function<SResponse(const SRequest&)> handler;
+        // Changes compositor code, configuration or outputs; restricted to trusted peers.
+        bool privileged = false;
     };
 
     class IImplementation;

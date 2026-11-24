@@ -12,6 +12,8 @@
 
 using namespace IPC::Socket1;
 
+bool                              enzuiAllowsControl();
+
 static constexpr std::string_view BATCH_TOKEN     = "[[BATCH]]";
 static constexpr std::string_view BATCH_DELIMITER = "\n\n\n";
 
@@ -105,6 +107,9 @@ SResponse CSocket1::dispatchSingle(std::string request, pid_t pid) {
 
     if (!matched)
         return "unknown request";
+
+    if (matched->privileged && !enzuiAllowsControl())
+        return "error: compositor control is limited to the desktop shell";
 
     auto response = matched->handler(parsed);
 
