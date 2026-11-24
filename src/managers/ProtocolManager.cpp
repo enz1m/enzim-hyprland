@@ -413,12 +413,13 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 // to an approved process: the registered shell (input), a capture helper
 // the shell announced just before starting it (one use, its own child, the
 // announced executable), a process inside a cgroup named by a root-owned
-// grant, the screen-sharing portal (capture), a helper that portal starts
-// itself such as the screenshot or colour picker tool (capture), or the
-// remote desktop portal (input, after its own consent dialog). Executable
-// identity is the inode of /proc/PID/exe, never a name; LD_PRELOAD and
-// LD_AUDIT disqualify. A session lock disconnects every admitted client but
-// the shell, and while locked nothing else is admitted.
+// grant, the screen-sharing portal (capture and input capture), a helper
+// that portal starts itself such as the screenshot or colour picker tool
+// (capture), the remote desktop portal (input, after its own consent dialog)
+// or an approved input method (input method). Executable identity is the
+// inode of /proc/PID/exe, never a name; LD_PRELOAD and LD_AUDIT disqualify.
+// A session lock disconnects every admitted client but the shell and input
+// methods, and while locked nothing else is admitted.
 //
 // Compositor control requests need the same kind of identity: see
 // controlAllowed.
@@ -446,7 +447,7 @@ namespace EnzuiAdmission {
             std::unordered_map<std::string, std::string> values;
             for (const auto* key :
                  {"ENZUI_PRIVILEGED_CLIENTS", "ENZUI_SHELL_EXE", "ENZUI_SHELL_LAUNCHER_PID", "ENZUI_SHELL_LAUNCHER_START", "ENZUI_SHELL_LAUNCHER_FD", "ENZUI_PORTAL_EXES",
-                  "ENZUI_PORTAL_INPUT_EXES", "ENZUI_PORTAL_HELPER_EXES", "ENZUI_DEV_PRIVILEGED_EXES", "ENZUI_CONTROL_EXES", "LD_LIBRARY_PATH"})
+                  "ENZUI_PORTAL_INPUT_EXES", "ENZUI_PORTAL_HELPER_EXES", "ENZUI_DEV_PRIVILEGED_EXES", "ENZUI_CONTROL_EXES", "ENZUI_IME_EXES", "LD_LIBRARY_PATH"})
                 values.emplace(key, getenv(key) ? getenv(key) : "");
             return values;
         }();
@@ -481,8 +482,10 @@ namespace EnzuiAdmission {
     static thread_local const SPeer* controlPeer = nullptr;
 
     enum eKind : uint8_t {
-        KIND_CAPTURE = 1,
-        KIND_INPUT   = 2,
+        KIND_CAPTURE       = 1,
+        KIND_INPUT         = 2,
+        KIND_INPUT_METHOD  = 4,
+        KIND_INPUT_CAPTURE = 8,
     };
 
     struct SProc {
@@ -529,6 +532,10 @@ namespace EnzuiAdmission {
             return KIND_CAPTURE;
         if (name == "zwlr_virtual_pointer_manager_v1" || name == "zwp_virtual_keyboard_manager_v1")
             return KIND_INPUT;
+        if (name == "zwp_input_method_manager_v2")
+            return KIND_INPUT_METHOD;
+        if (name == "hyprland_input_capture_manager_v1")
+            return KIND_INPUT_CAPTURE;
         return 0;
     }
 
@@ -769,9 +776,11 @@ namespace EnzuiAdmission {
             kinds |= KIND_INPUT;
         if (!injected(pid)) {
             if (exeInList(pid, "ENZUI_PORTAL_EXES"))
-                kinds |= KIND_CAPTURE;
+                kinds |= KIND_CAPTURE | KIND_INPUT_CAPTURE;
             if (exeInList(pid, "ENZUI_DEV_PRIVILEGED_EXES"))
-                kinds |= KIND_CAPTURE | KIND_INPUT;
+                kinds |= KIND_CAPTURE | KIND_INPUT | KIND_INPUT_METHOD | KIND_INPUT_CAPTURE;
+            if (exeInList(pid, "ENZUI_IME_EXES"))
+                kinds |= KIND_INPUT_METHOD;
             if (exeInList(pid, "ENZUI_PORTAL_INPUT_EXES"))
                 kinds |= KIND_INPUT;
             if (exeInList(pid, "ENZUI_PORTAL_HELPER_EXES") && exeInList(proc.ppid, "ENZUI_PORTAL_EXES") && !injected(proc.ppid))
@@ -909,7 +918,8 @@ bool enzuiAllowsGlobal(const wl_client* client, const wl_global* global) {
     const auto kind = EnzuiAdmission::kindOf(global);
     if (!kind)
         return true;
-    if (g_pSessionLockManager && g_pSessionLockManager->isSessionLocked() && !EnzuiAdmission::isShell(client))
+    // Input methods receive nothing while locked, so one starting then stays usable afterwards.
+    if (kind != EnzuiAdmission::KIND_INPUT_METHOD && g_pSessionLockManager && g_pSessionLockManager->isSessionLocked() && !EnzuiAdmission::isShell(client))
         return false;
     return EnzuiAdmission::decide(client) & kind;
 }
@@ -927,8 +937,8 @@ void enzuiRevokePrivileged() {
     if (!EnzuiAdmission::enforcing())
         return;
     std::vector<wl_client*> revoked;
-    for (const auto& [client, _] : EnzuiAdmission::admitted) {
-        if (!EnzuiAdmission::isShell(client))
+    for (const auto& [client, entry] : EnzuiAdmission::admitted) {
+        if ((entry->kinds & ~EnzuiAdmission::KIND_INPUT_METHOD) && !EnzuiAdmission::isShell(client))
             revoked.push_back(const_cast<wl_client*>(client));
     }
     for (auto* client : revoked) {

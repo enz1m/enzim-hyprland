@@ -26,6 +26,7 @@ class CInputMethodRelay {
     void               activateIME(CTextInput* pInput, bool shouldCommit = true);
     void               deactivateIME(CTextInput* pInput, bool shouldCommit = true);
     void               commitIMEState(CTextInput* pInput);
+    bool               imeAllowed() const;
     void               removeTextInput(CTextInput* pInput);
 
     void               onKeyboardFocus(SP<CWLSurfaceResource>);

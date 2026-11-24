@@ -34,6 +34,7 @@ class CTextInput {
     CBox                   cursorBox();
 
     SP<CWLSurfaceResource> focusedSurface();
+    bool                   onLockSurface() const;
 
   private:
     void                   setFocusedSurface(SP<CWLSurfaceResource> pSurface);
@@ -42,7 +43,8 @@ class CTextInput {
     void                   destroy();
 
     WP<CWLSurfaceResource> m_focusedSurface;
-    int                    m_enterLocks = 0;
+    int                    m_enterLocks  = 0;
+    bool                   m_lockSurface = false;
     WP<CTextInputV3>       m_v3Input;
     WP<CTextInputV1>       m_v1Input;
 

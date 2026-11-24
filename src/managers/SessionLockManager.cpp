@@ -2,6 +2,7 @@
 #include "../Compositor.hpp"
 #include "../config/ConfigValue.hpp"
 #include "../protocols/FractionalScale.hpp"
+#include "../protocols/InputCapture.hpp"
 #include "../protocols/SessionLock.hpp"
 #include "../render/Renderer.hpp"
 #include "../desktop/state/FocusState.hpp"
@@ -66,6 +67,7 @@ void CSessionLockManager::onNewSessionLock(SP<CSessionLock> pLock) {
     LOG(Log::DEBUG, "Session got locked by {:x}", (uintptr_t)pLock.get());
     // enzUI: capture and virtual input end when the session locks.
     enzuiRevokePrivileged();
+    PROTO::inputCapture->forceRelease();
 
     m_sessionLock       = makeUnique<SSessionLock>();
     m_sessionLock->lock = pLock;

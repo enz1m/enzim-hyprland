@@ -5,6 +5,7 @@
 #include "../../protocols/TextInputV1.hpp"
 #include "../../protocols/InputMethodV2.hpp"
 #include "../../protocols/core/Compositor.hpp"
+#include "../SessionLockManager.hpp"
 
 CInputMethodRelay::CInputMethodRelay() {
     static auto P = Event::bus()->m_events.input.keyboard.focus.listen([&](SP<CWLSurfaceResource> surf) { onKeyboardFocus(surf); });
@@ -26,12 +27,18 @@ void CInputMethodRelay::onNewIME(SP<CInputMethodV2> pIME) {
     m_inputMethod = pIME;
 
     m_listeners.commitIME = pIME->m_events.onCommit.listen([this] {
+        if (!imeAllowed())
+            return;
+
         const auto PTI = getFocusedTextInput();
 
         if (!PTI) {
             LOG(Log::DEBUG, "No focused TextInput on IME Commit");
             return;
         }
+
+        if (PTI->onLockSurface())
+            return;
 
         PTI->updateIMEState(m_inputMethod.lock());
     });
@@ -105,8 +112,13 @@ void CInputMethodRelay::updateAllPopups() {
     }
 }
 
+// Lock-screen fields and keys typed while locked never reach the input method.
+bool CInputMethodRelay::imeAllowed() const {
+    return !g_pSessionLockManager || !g_pSessionLockManager->isSessionLocked();
+}
+
 void CInputMethodRelay::activateIME(CTextInput* pInput, bool shouldCommit) {
-    if (m_inputMethod.expired())
+    if (m_inputMethod.expired() || !imeAllowed() || (pInput && pInput->onLockSurface()))
         return;
 
     m_inputMethod->activate();
@@ -126,6 +138,11 @@ void CInputMethodRelay::deactivateIME(CTextInput* pInput, bool shouldCommit) {
 void CInputMethodRelay::commitIMEState(CTextInput* pInput) {
     if (m_inputMethod.expired())
         return;
+
+    if (!imeAllowed() || pInput->onLockSurface()) {
+        m_inputMethod->done();
+        return;
+    }
 
     pInput->commitStateToIME(m_inputMethod.lock());
 }

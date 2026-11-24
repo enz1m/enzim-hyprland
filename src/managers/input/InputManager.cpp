@@ -1717,7 +1717,7 @@ void CInputManager::onKeyboardKey(const IKeyboard::SKeyEvent& event, SP<IKeyboar
     const bool           DISALLOWACTION = pKeyboard->isVirtual() && shouldIgnoreVirtualKeyboard(pKeyboard);
 
     const auto           IME    = m_relay.m_inputMethod.lock();
-    const bool           HASIME = IME && IME->hasGrab();
+    const bool           HASIME = IME && IME->hasGrab() && m_relay.imeAllowed();
     const bool           USEIME = HASIME && !DISALLOWACTION;
 
     Event::SCallbackInfo info;
@@ -1788,7 +1788,7 @@ void CInputManager::onKeyboardMod(SP<IKeyboard> pKeyboard) {
     const bool DISALLOWACTION = pKeyboard->isVirtual() && shouldIgnoreVirtualKeyboard(pKeyboard);
 
     const auto IME               = m_relay.m_inputMethod.lock();
-    const bool HASIME            = IME && IME->hasGrab();
+    const bool HASIME            = IME && IME->hasGrab() && m_relay.imeAllowed();
     const bool USEIME            = HASIME && !DISALLOWACTION;
     auto       MODS              = pKeyboard->m_modifiersState;
     const auto DEPRESSED_MODS_HL = xkbModsToHyprland(pKeyboard, MODS.depressed);

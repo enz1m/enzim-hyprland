@@ -8,6 +8,7 @@
 #include "hyprland-input-capture-v1.hpp"
 #include "pointer/PointerManager.hpp"
 #include "managers/SeatManager.hpp"
+#include "managers/SessionLockManager.hpp"
 #include "managers/eventLoop/EventLoopManager.hpp"
 #include "managers/permissions/DynamicPermissionManager.hpp"
 #include "protocols/WaylandProtocol.hpp"
@@ -212,7 +213,7 @@ void CInputCaptureResource::onClearBarriers() {
 }
 
 bool CInputCaptureResource::activate(double x, double y, uint32_t borderId) {
-    if (m_status != CLIENT_STATUS_ENABLED)
+    if (m_status != CLIENT_STATUS_ENABLED || (g_pSessionLockManager && g_pSessionLockManager->isSessionLocked()))
         return false;
 
     const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_INPUT_CAPTURE);

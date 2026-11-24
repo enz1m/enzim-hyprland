@@ -126,6 +126,9 @@ void CTextInput::setFocusedSurface(SP<CWLSurfaceResource> pSurface) {
     if (!pSurface)
         return;
 
+    // Kept after the surface leaves, so the deactivation that follows an unlock is still private.
+    m_lockSurface = g_pSessionLockManager && g_pSessionLockManager->isSurfaceSessionLock(pSurface);
+
     m_listeners.surfaceUnmap.reset();
     m_listeners.surfaceDestroy.reset();
 
@@ -222,6 +225,10 @@ void CTextInput::leave() {
 
 SP<CWLSurfaceResource> CTextInput::focusedSurface() {
     return m_focusedSurface.lock();
+}
+
+bool CTextInput::onLockSurface() const {
+    return m_lockSurface;
 }
 
 wl_client* CTextInput::client() {
