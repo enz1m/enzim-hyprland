@@ -432,6 +432,7 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <array>
 #include <charconv>
 #include <utility>
 #include <fcntl.h>
@@ -439,6 +440,9 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <hyprutils/os/FileDescriptor.hpp>
+#ifdef USES_SYSTEMD
+#include <systemd/sd-bus.h>
+#endif
 
 namespace EnzuiAdmission {
     using Hyprutils::OS::CFileDescriptor;
@@ -668,6 +672,32 @@ namespace EnzuiAdmission {
         return false;
     }
 
+    // A portal binary is admitted only as the process holding a system portal's
+    // name on the compositor's session bus: another copy of it, run beside the
+    // real one or on a private bus whose callers it would trust, gets nothing.
+    static bool portalOnSessionBus(pid_t pid) {
+#ifdef USES_SYSTEMD
+        static constexpr std::array NAMES  = {"org.freedesktop.impl.portal.desktop.hyprland", "org.freedesktop.impl.portal.desktop.enzuiremote"};
+        sd_bus*                     opened = nullptr;
+        if (sd_bus_open_user(&opened) < 0) {
+            LOG(Log::ERR, "enzUI admission: session bus unavailable");
+            return false;
+        }
+        const std::unique_ptr<sd_bus, decltype(&sd_bus_flush_close_unref)> bus(opened, sd_bus_flush_close_unref);
+        sd_bus_set_method_call_timeout(bus.get(), 500 * 1000);
+        for (const auto* name : NAMES) {
+            sd_bus_message* received = nullptr;
+            const int       result =
+                sd_bus_call_method(bus.get(), "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetConnectionUnixProcessID", nullptr, &received, "s", name);
+            const std::unique_ptr<sd_bus_message, decltype(&sd_bus_message_unref)> reply(received, sd_bus_message_unref);
+            uint32_t                                                               owner = 0;
+            if (result >= 0 && sd_bus_message_read(reply.get(), "u", &owner) >= 0 && owner == sc<uint32_t>(pid))
+                return true;
+        }
+#endif
+        return false;
+    }
+
     // Loader variables that would run other code inside an identified binary:
     // any preload or audit library, or a library search path other than the
     // one the compositor itself was started with.
@@ -776,15 +806,15 @@ namespace EnzuiAdmission {
         if (claimShell(pid, proc.start, owner.handle.get()))
             kinds |= KIND_INPUT;
         if (!injected(pid)) {
-            if (exeInList(pid, "ENZUI_PORTAL_EXES"))
+            if (exeInList(pid, "ENZUI_PORTAL_EXES") && portalOnSessionBus(pid))
                 kinds |= KIND_CAPTURE | KIND_INPUT_CAPTURE;
             if (exeInList(pid, "ENZUI_DEV_PRIVILEGED_EXES"))
                 kinds |= KIND_CAPTURE | KIND_INPUT | KIND_INPUT_METHOD | KIND_INPUT_CAPTURE;
             if (exeInList(pid, "ENZUI_IME_EXES"))
                 kinds |= KIND_INPUT_METHOD;
-            if (exeInList(pid, "ENZUI_PORTAL_INPUT_EXES"))
+            if (exeInList(pid, "ENZUI_PORTAL_INPUT_EXES") && portalOnSessionBus(pid))
                 kinds |= KIND_INPUT;
-            if (exeInList(pid, "ENZUI_PORTAL_HELPER_EXES") && exeInList(proc.ppid, "ENZUI_PORTAL_EXES") && !injected(proc.ppid))
+            if (exeInList(pid, "ENZUI_PORTAL_HELPER_EXES") && exeInList(proc.ppid, "ENZUI_PORTAL_EXES") && !injected(proc.ppid) && portalOnSessionBus(proc.ppid))
                 kinds |= KIND_CAPTURE;
             const auto now = std::chrono::steady_clock::now();
             std::erase_if(intents, [now](const auto& intent) {

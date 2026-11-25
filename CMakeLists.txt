@@ -416,6 +416,9 @@ if(NO_SYSTEMD)
 else()
   message(STATUS "SYSTEMD support is requested (NO_SYSTEMD not defined)...")
   add_compile_definitions(USES_SYSTEMD)
+  # enzUI: privileged client admission asks the session bus who holds a portal's name.
+  pkg_check_modules(libsystemd_dep REQUIRED IMPORTED_TARGET libsystemd)
+  target_link_libraries(hyprland_lib PUBLIC PkgConfig::libsystemd_dep)
 
   install(FILES ${CMAKE_SOURCE_DIR}/systemd/hyprland-session.target
           DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user)
