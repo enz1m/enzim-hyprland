@@ -12,6 +12,7 @@
 class CHyprBorderDecoration;
 class CHyprDropShadowDecoration;
 class CHyprInnerGlowDecoration;
+class CHyprTitleBarDecoration;
 
 namespace Desktop::View {
     class CWindow;
@@ -37,6 +38,8 @@ namespace Desktop::View {
         void                                              updateDecorations();
         void                                              uncacheDecorations();
         bool                                              checkInputOnDecorations(eInputType type, const Vector2D& coordinates, std::any data = {});
+        bool                                              titleBarShown() const;
+        void                                              onDecorationModeChanged();
 
         Types::CMultiAVarContainer<float, uint8_t>&       alpha();
         const Types::CMultiAVarContainer<float, uint8_t>& alpha() const;
@@ -89,6 +92,7 @@ namespace Desktop::View {
         SP<CHyprDropShadowDecoration>              m_shadowDecoration;
         SP<CHyprBorderDecoration>                  m_borderDecoration;
         SP<CHyprInnerGlowDecoration>               m_glowDecoration;
+        SP<CHyprTitleBarDecoration>                m_titleBarDecoration;
         Types::CMultiAVarContainer<float, uint8_t> m_alpha;
         PHLANIMVAR<float>                          m_dimPercent;
         PHLANIMVAR<float>                          m_notRespondingTint;

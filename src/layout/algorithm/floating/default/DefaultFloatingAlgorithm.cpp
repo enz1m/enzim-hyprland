@@ -8,6 +8,7 @@
 #include "../../../../config/ConfigValue.hpp"
 #include "../../../../Compositor.hpp"
 #include "../../../../desktop/state/WindowState.hpp"
+#include "../../../../desktop/view/window/WindowPresentation.hpp"
 #include "../../../../output/Monitor.hpp"
 #include "../../../../state/MonitorState.hpp"
 
@@ -46,6 +47,7 @@ void CDefaultFloatingAlgorithm::newTarget(SP<ITarget> target) {
     }
 
     bool posOverridden = false;
+    bool centred       = false;
 
     if (target->window() && (target->window()->m_state & Desktop::View::WINDOW_STATE_FIRST_MAP)) {
         const auto WINDOW = target->window();
@@ -97,15 +99,27 @@ void CDefaultFloatingAlgorithm::newTarget(SP<ITarget> target) {
         const auto POS   = WORK_AREA.middle() - windowGeometry.size() / 2.f;
         windowGeometry.x = POS.x;
         windowGeometry.y = POS.y;
+        centred          = true;
     }
+
+    // A compositor title bar sits above the window: centre the two together.
+    static auto PBARHEIGHT = CConfigValue<Config::INTEGER>("decoration:titlebar:height");
+    const bool  BARRED     = !posOverridden && target->window() && target->window()->presentation().titleBarShown();
+    const auto  BAR        = BARRED ? sc<double>(*PBARHEIGHT) : 0.0;
+    if (centred)
+        windowGeometry.y += BAR / 2.0;
 
     static auto PFORCEONSCREEN = CConfigValue<Config::INTEGER>("misc:new_float_force_onscreen");
     switch (*PFORCEONSCREEN) {
         default:
-        case 0: target->setPositionGlobal(windowGeometry); break;
-        case 1: target->setPositionGlobal(fitBoxInWorkArea(windowGeometry, target, false)); break;
-        case 2: target->setPositionGlobal(fitBoxInWorkArea(windowGeometry, target, true)); break;
+        case 0: break;
+        case 1: windowGeometry = fitBoxInWorkArea(windowGeometry, target, false); break;
+        case 2: windowGeometry = fitBoxInWorkArea(windowGeometry, target, true); break;
     }
+    // The bar stays reachable even when the window is taller than the work area.
+    if (BARRED)
+        windowGeometry.y = std::max(windowGeometry.y, WORK_AREA.y + BAR);
+    target->setPositionGlobal(windowGeometry);
 
     // TODO: not very OOP, is it?
     if (const auto WTARGET = dynamicPointerCast<CWindowTarget>(target); WTARGET) {

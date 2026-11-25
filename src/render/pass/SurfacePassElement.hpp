@@ -25,7 +25,9 @@ class CSurfacePassElement : public IPassElement {
         int                    rounding      = 0;
         bool                   dontRound     = true;
         float                  roundingPower = 2.0F;
-        bool                   decorate      = false;
+        // The window has a title bar above it, so its top corners stay square.
+        bool                   squareTopCorners = false;
+        bool                   decorate         = false;
         float                  alpha = 1.F, fadeAlpha = 1.F;
         bool                   blur                  = false;
         bool                   blockBlurOptimization = false;

@@ -22,6 +22,9 @@
 #include "../protocols/core/Compositor.hpp"
 #include "../desktop/state/FocusState.hpp"
 #include "../desktop/view/window/X11Backend.hpp"
+#include "../desktop/view/window/Window.hpp"
+#include "../desktop/view/window/WindowPresentation.hpp"
+#include "../desktop/view/WLSurface.hpp"
 using Hyprutils::Memory::CUniquePointer;
 
 using namespace Hyprutils::OS;
@@ -331,6 +334,28 @@ void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_
             XSURF->m_sizeHints->max_width = XSURF->m_sizeHints->max_height = -1;
     };
 
+    auto handleMotifHints = [&]() {
+        constexpr uint32_t  MWM_HINTS_DECORATIONS = 1 << 1;
+        constexpr uint32_t  MWM_DECOR_ALL         = 1 << 0;
+        constexpr uint32_t  MWM_DECOR_TITLE       = 1 << 3;
+
+        std::optional<bool> titleBar;
+        if (reply->format == 32 && reply->value_len >= 3) {
+            const auto* hints = rc<const uint32_t*>(value);
+            if (hints[0] & MWM_HINTS_DECORATIONS)
+                titleBar = (hints[2] & (MWM_DECOR_ALL | MWM_DECOR_TITLE)) != 0;
+        }
+
+        if (XSURF->m_motifTitleBar == titleBar)
+            return;
+
+        XSURF->m_motifTitleBar = titleBar;
+        const auto SURFACE     = XSURF->m_surface.lock();
+        const auto VIEW        = SURFACE ? Desktop::View::CWLSurface::fromResource(SURFACE) : nullptr;
+        if (const auto WINDOW = VIEW ? Desktop::View::CWindow::fromView(VIEW->view()) : nullptr)
+            WINDOW->presentation().onDecorationModeChanged();
+    };
+
     auto handleWMProtocols = [&]() {
         if (reply->type != XCB_ATOM_ATOM)
             return;
@@ -356,6 +381,8 @@ void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_
         handleSizeHints();
     else if (atom == HYPRATOMS["WM_PROTOCOLS"])
         handleWMProtocols();
+    else if (atom == HYPRATOMS["_MOTIF_WM_HINTS"])
+        handleMotifHints();
     else {
         LOG(Log::TRACE, "[xwm] Unhandled prop {} -> {}", atom, propName);
         return;
@@ -1184,10 +1211,17 @@ void CXWM::onNewResource(SP<CXWaylandSurfaceResource> resource) {
 }
 
 void CXWM::readWindowData(SP<CXWaylandSurface> surf) {
-    const std::array<xcb_atom_t, 9> interestingProps = {
-        XCB_ATOM_WM_CLASS,          XCB_ATOM_WM_NAME,          XCB_ATOM_WM_TRANSIENT_FOR,        HYPRATOMS["WM_HINTS"],
-        HYPRATOMS["_NET_WM_STATE"], HYPRATOMS["_NET_WM_NAME"], HYPRATOMS["_NET_WM_WINDOW_TYPE"], HYPRATOMS["WM_NORMAL_HINTS"],
+    const std::array<xcb_atom_t, 10> interestingProps = {
+        XCB_ATOM_WM_CLASS,
+        XCB_ATOM_WM_NAME,
+        XCB_ATOM_WM_TRANSIENT_FOR,
+        HYPRATOMS["WM_HINTS"],
+        HYPRATOMS["_NET_WM_STATE"],
+        HYPRATOMS["_NET_WM_NAME"],
+        HYPRATOMS["_NET_WM_WINDOW_TYPE"],
+        HYPRATOMS["WM_NORMAL_HINTS"],
         HYPRATOMS["WM_PROTOCOLS"],
+        HYPRATOMS["_MOTIF_WM_HINTS"],
     };
 
     for (size_t i = 0; i < interestingProps.size(); i++) {

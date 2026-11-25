@@ -1,7 +1,17 @@
 #include "XDGDecoration.hpp"
+#include "XDGShell.hpp"
+#include "../desktop/view/window/Window.hpp"
+#include "../desktop/view/window/WindowPresentation.hpp"
 #include <algorithm>
 
-CXDGDecoration::CXDGDecoration(SP<CZxdgToplevelDecorationV1> resource_, wl_resource* toplevel) : m_resource(resource_), m_toplevelResource(toplevel) {
+static void refreshWindowDecorations(const WP<CXDGToplevelResource>& toplevel) {
+    const auto TOPLEVEL = toplevel.lock();
+    if (const auto WINDOW = TOPLEVEL ? TOPLEVEL->m_window.lock() : nullptr)
+        WINDOW->presentation().onDecorationModeChanged();
+}
+
+CXDGDecoration::CXDGDecoration(SP<CZxdgToplevelDecorationV1> resource_, wl_resource* toplevel) :
+    m_resource(resource_), m_toplevelResource(toplevel), m_toplevel(CXDGToplevelResource::fromResource(toplevel)) {
     if UNLIKELY (!m_resource->resource())
         return;
 
@@ -17,24 +27,26 @@ CXDGDecoration::CXDGDecoration(SP<CZxdgToplevelDecorationV1> resource_, wl_resou
         }
 
         auto sendMode = xdgModeOnRequestCSD(mode);
-        LOG(Log::DEBUG, "setMode: {}. Sending {} as reply.", modeString,
-            sendMode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE ? "MODE_CLIENT_SIDE" : "MODE_SERVER_SIDE");
-        m_resource->sendConfigure(sendMode);
-        mostRecentlySent      = sendMode;
+        LOG(Log::DEBUG, "setMode: {}. Sending {} as reply.", modeString, sendMode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE ? "MODE_CLIENT_SIDE" : "MODE_SERVER_SIDE");
         mostRecentlyRequested = mode;
+        this->sendMode(sendMode);
     });
 
     m_resource->setUnsetMode([this](CZxdgToplevelDecorationV1*) {
         LOG(Log::DEBUG, "unsetMode. Sending MODE_SERVER_SIDE.");
-        auto sendMode = xdgModeOnReleaseCSD();
-        m_resource->sendConfigure(sendMode);
-        mostRecentlySent      = sendMode;
         mostRecentlyRequested = 0;
+        sendMode(xdgModeOnReleaseCSD());
     });
 
-    auto sendMode = xdgDefaultModeCSD();
-    m_resource->sendConfigure(sendMode);
-    mostRecentlySent = sendMode;
+    sendMode(xdgDefaultModeCSD());
+}
+
+void CXDGDecoration::sendMode(zxdgToplevelDecorationV1Mode mode) {
+    m_resource->sendConfigure(mode);
+    const bool CHANGED = mostRecentlySent != mode;
+    mostRecentlySent   = mode;
+    if (CHANGED)
+        refreshWindowDecorations(m_toplevel);
 }
 
 zxdgToplevelDecorationV1Mode CXDGDecoration::xdgDefaultModeCSD() {
@@ -76,7 +88,21 @@ void CXDGDecorationProtocol::onManagerResourceDestroy(wl_resource* res) {
 }
 
 void CXDGDecorationProtocol::destroyDecoration(CXDGDecoration* decoration) {
+    const auto TOPLEVEL = decoration->m_toplevel;
     m_decorations.erase(decoration->toplevelResource());
+    refreshWindowDecorations(TOPLEVEL);
+}
+
+std::optional<zxdgToplevelDecorationV1Mode> CXDGDecorationProtocol::modeFor(SP<CXDGToplevelResource> toplevel) const {
+    if (!toplevel)
+        return std::nullopt;
+
+    for (const auto& [_, decoration] : m_decorations) {
+        if (decoration->m_toplevel == toplevel && decoration->mostRecentlySent)
+            return sc<zxdgToplevelDecorationV1Mode>(decoration->mostRecentlySent);
+    }
+
+    return std::nullopt;
 }
 
 void CXDGDecorationProtocol::onGetDecoration(CZxdgDecorationManagerV1* pMgr, uint32_t id, wl_resource* xdgToplevel) {

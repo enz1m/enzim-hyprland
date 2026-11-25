@@ -94,6 +94,8 @@ class CXWaylandSurface {
     UP<xcb_size_hints_t>              m_sizeHints;
     std::vector<uint32_t>             m_atoms;
     std::vector<uint32_t>             m_protocols;
+    // Whether _MOTIF_WM_HINTS asks the window manager for a title bar; unset without the hint.
+    std::optional<bool>               m_motifTitleBar;
     std::string                       m_role      = "";
     bool                              m_transient = false;
 

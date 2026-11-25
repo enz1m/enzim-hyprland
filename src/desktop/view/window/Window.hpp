@@ -23,6 +23,8 @@
 #include "../surfaceTree/SubsurfaceOwner.hpp"
 #include "WindowBackend.hpp"
 
+class CHyprTitleBarDecoration;
+
 namespace Config {
     class CWorkspaceRule;
 }
@@ -257,6 +259,8 @@ namespace Desktop::View {
         PHLWINDOWREF m_self;
 
       private:
+        friend class ::CHyprTitleBarDecoration;
+
         void         activateWithPolicy(bool force, bool userInput);
         void         initialize();
         void         attachBackendListeners();

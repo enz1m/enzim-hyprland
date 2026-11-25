@@ -317,6 +317,8 @@ void IElementRenderer::drawSurface(WP<CSurfacePassElement> element, const CRegio
         roundingPower = 2.0f;
     }
 
+    const int  roundingTopExtension = m_data.squareTopCorners && rounding > 0 ? sc<int>(std::ceil(rounding)) + 1 : 0;
+
     const bool WINDOWOPAQUE    = m_data.pWindow && m_data.pWindow->wlSurface()->resource() == m_data.surface ? m_data.pWindow->presentation().opaque() : false;
     const bool CANDISABLEBLEND = ALPHA >= 1.f && OVERALL_ALPHA >= 1.f && rounding <= 0 && WINDOWOPAQUE;
 
@@ -341,6 +343,7 @@ void IElementRenderer::drawSurface(WP<CSurfacePassElement> element, const CRegio
                             .overallA              = OVERALL_ALPHA,
                             .round                 = rounding,
                             .roundingPower         = roundingPower,
+                            .roundingTopExtension  = roundingTopExtension,
                             .blur                  = true,
                             .blurPatternBox        = blurPatternBox,
                             .blockBlurOptimization = m_data.blockBlurOptimization,
@@ -358,20 +361,21 @@ void IElementRenderer::drawSurface(WP<CSurfacePassElement> element, const CRegio
                         surfaceDamage());
         } else
             drawElement(makeShared<CTexPassElement>(CTexPassElement::SRenderData{
-                            .tex            = TEXTURE,
-                            .box            = windowBox,
-                            .a              = ALPHA * OVERALL_ALPHA,
-                            .round          = rounding,
-                            .roundingPower  = roundingPower,
-                            .discardActive  = false,
-                            .allowCustomUV  = true,
-                            .surface        = m_data.surface,
-                            .wrapX          = m_data.wrapX,
-                            .wrapY          = m_data.wrapY,
-                            .discardMode    = m_data.discardMode,
-                            .discardOpacity = m_data.discardOpacity,
-                            .clipRegion     = clipRegion,
-                            .currentLS      = m_data.pLS,
+                            .tex                  = TEXTURE,
+                            .box                  = windowBox,
+                            .a                    = ALPHA * OVERALL_ALPHA,
+                            .round                = rounding,
+                            .roundingPower        = roundingPower,
+                            .roundingTopExtension = roundingTopExtension,
+                            .discardActive        = false,
+                            .allowCustomUV        = true,
+                            .surface              = m_data.surface,
+                            .wrapX                = m_data.wrapX,
+                            .wrapY                = m_data.wrapY,
+                            .discardMode          = m_data.discardMode,
+                            .discardOpacity       = m_data.discardOpacity,
+                            .clipRegion           = clipRegion,
+                            .currentLS            = m_data.pLS,
                         }),
                         surfaceDamage());
     } else {
