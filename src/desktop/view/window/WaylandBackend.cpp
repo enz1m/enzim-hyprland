@@ -6,6 +6,8 @@
 #include "../popup/WaylandPopupBackend.hpp"
 #include "../../../protocols/XDGDialog.hpp"
 #include "../../../protocols/XDGShell.hpp"
+#include "../../../protocols/XDGDecoration.hpp"
+#include "../../../protocols/ServerDecorationKDE.hpp"
 #include "../../../protocols/core/Compositor.hpp"
 #include "managers/fullscreen/FullscreenController.hpp"
 #include "managers/fullscreen/FullscreenTypes.hpp"
@@ -270,6 +272,22 @@ SBackendTraits CWaylandBackend::traits() const {
     const auto RESOURCE = m_resource.lock();
     const auto TOPLEVEL = RESOURCE ? RESOURCE->m_toplevel.lock() : nullptr;
     return TOPLEVEL ? traitsFrom(TOPLEVEL) : m_traits;
+}
+
+bool CWaylandBackend::wantsServerDecorations() const {
+    const auto RESOURCE = m_resource.lock();
+    const auto TOPLEVEL = RESOURCE ? RESOURCE->m_toplevel.lock() : nullptr;
+    if (!TOPLEVEL)
+        return false;
+
+    if (const auto MODE = PROTO::xdgDecoration->modeFor(TOPLEVEL))
+        return *MODE == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+
+    // Clients without either decoration protocol are assumed to draw their own frame.
+    if (const auto MODE = PROTO::serverDecorationKDE->modeFor(RESOURCE->m_surface.lock()))
+        return *MODE == ORG_KDE_KWIN_SERVER_DECORATION_MANAGER_MODE_SERVER;
+
+    return false;
 }
 
 double CWaylandBackend::surfaceScale() const {

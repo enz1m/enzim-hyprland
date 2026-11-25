@@ -1557,8 +1557,14 @@ WP<CShader> CHyprOpenGLImpl::renderToFBInternal(SP<ITexture> tex, const STexture
         shader->setUniformInt(SHADER_DISCARD_ALPHA, 0);
     }
 
-    const auto TOPLEFT  = newBox.pos();
-    const auto FULLSIZE = newBox.size();
+    auto roundingBox = newBox;
+    if (data.roundingTopExtension > 0 && m_renderData.pMonitor->m_transform == WL_OUTPUT_TRANSFORM_NORMAL) {
+        roundingBox.y -= data.roundingTopExtension;
+        roundingBox.height += data.roundingTopExtension;
+    }
+
+    const auto TOPLEFT  = roundingBox.pos();
+    const auto FULLSIZE = roundingBox.size();
     // Rounded corners
     shader->setUniformFloat2(SHADER_TOP_LEFT, TOPLEFT.x, TOPLEFT.y);
     shader->setUniformFloat2(SHADER_FULL_SIZE, FULLSIZE.x, FULLSIZE.y);
@@ -1883,6 +1889,7 @@ void CHyprOpenGLImpl::renderTextureWithBlurInternal(SP<ITexture> tex, const CBox
                               .a                           = data.a,
                               .round                       = data.round,
                               .roundingPower               = data.roundingPower,
+                              .roundingTopExtension        = data.roundingTopExtension,
                               .discardActive               = true,
                               .allowCustomUV               = true,
                               .wrapX                       = data.wrapX,
@@ -1928,19 +1935,20 @@ void CHyprOpenGLImpl::renderTextureWithBlurInternal(SP<ITexture> tex, const CBox
 
         renderTextureInternal(data.blurredBG, box,
                               STextureRenderData{
-                                  .damage         = data.damage,
-                                  .a              = (*PBLURIGNOREOPACITY ? data.blurA : data.a * data.blurA) * data.overallA,
-                                  .round          = data.round,
-                                  .roundingPower  = data.roundingPower,
-                                  .discardActive  = false,
-                                  .allowCustomUV  = true,
-                                  .noAA           = false,
-                                  .wrapX          = data.wrapX,
-                                  .wrapY          = data.wrapY,
-                                  .discardMode    = data.discardMode,
-                                  .discardOpacity = data.discardOpacity,
-                                  .clipRegion     = blurClipRegion,
-                                  .currentLS      = data.currentLS,
+                                  .damage               = data.damage,
+                                  .a                    = (*PBLURIGNOREOPACITY ? data.blurA : data.a * data.blurA) * data.overallA,
+                                  .round                = data.round,
+                                  .roundingPower        = data.roundingPower,
+                                  .roundingTopExtension = data.roundingTopExtension,
+                                  .discardActive        = false,
+                                  .allowCustomUV        = true,
+                                  .noAA                 = false,
+                                  .wrapX                = data.wrapX,
+                                  .wrapY                = data.wrapY,
+                                  .discardMode          = data.discardMode,
+                                  .discardOpacity       = data.discardOpacity,
+                                  .clipRegion           = blurClipRegion,
+                                  .currentLS            = data.currentLS,
 
                                   .primarySurfaceUVTopLeft     = monitorSpaceBox.pos() / m_renderData.pMonitor->m_transformedSize,
                                   .primarySurfaceUVBottomRight = (monitorSpaceBox.pos() + monitorSpaceBox.size()) / m_renderData.pMonitor->m_transformedSize,
@@ -1955,23 +1963,24 @@ void CHyprOpenGLImpl::renderTextureWithBlurInternal(SP<ITexture> tex, const CBox
     // draw window
     renderTextureInternal(tex, box,
                           STextureRenderData{
-                              .blur           = SHADERBLEND,
-                              .blurredBG      = data.blurredBG,
-                              .blurAlphaMatte = data.blurAlphaMatte,
-                              .damage         = data.damage,
-                              .a              = data.a * data.overallA,
-                              .round          = data.round,
-                              .roundingPower  = data.roundingPower,
-                              .discardActive  = SHADERBLEND && NEEDS_STENCIL,
-                              .allowCustomUV  = true,
-                              .allowDim       = true,
-                              .noAA           = false,
-                              .wrapX          = data.wrapX,
-                              .wrapY          = data.wrapY,
-                              .discardMode    = data.discardMode,
-                              .discardOpacity = data.discardOpacity,
-                              .clipRegion     = data.clipRegion,
-                              .currentLS      = data.currentLS,
+                              .blur                 = SHADERBLEND,
+                              .blurredBG            = data.blurredBG,
+                              .blurAlphaMatte       = data.blurAlphaMatte,
+                              .damage               = data.damage,
+                              .a                    = data.a * data.overallA,
+                              .round                = data.round,
+                              .roundingPower        = data.roundingPower,
+                              .roundingTopExtension = data.roundingTopExtension,
+                              .discardActive        = SHADERBLEND && NEEDS_STENCIL,
+                              .allowCustomUV        = true,
+                              .allowDim             = true,
+                              .noAA                 = false,
+                              .wrapX                = data.wrapX,
+                              .wrapY                = data.wrapY,
+                              .discardMode          = data.discardMode,
+                              .discardOpacity       = data.discardOpacity,
+                              .clipRegion           = data.clipRegion,
+                              .currentLS            = data.currentLS,
 
                               .primarySurfaceUVTopLeft     = g_pHyprRenderer->m_renderData.primarySurfaceUVTopLeft,
                               .primarySurfaceUVBottomRight = g_pHyprRenderer->m_renderData.primarySurfaceUVBottomRight,

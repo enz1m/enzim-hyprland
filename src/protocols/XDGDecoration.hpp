@@ -1,9 +1,12 @@
 #pragma once
 
+#include <optional>
 #include <vector>
 #include <unordered_map>
 #include "WaylandProtocol.hpp"
 #include "xdg-decoration-unstable-v1.hpp"
+
+class CXDGToplevelResource;
 
 class CXDGDecoration {
   public:
@@ -19,9 +22,13 @@ class CXDGDecoration {
     zxdgToplevelDecorationV1Mode  xdgDefaultModeCSD();
     zxdgToplevelDecorationV1Mode  xdgModeOnRequestCSD(uint32_t modeRequestedByClient);
     zxdgToplevelDecorationV1Mode  xdgModeOnReleaseCSD();
+    void                          sendMode(zxdgToplevelDecorationV1Mode mode);
 
     SP<CZxdgToplevelDecorationV1> m_resource;
     wl_resource*                  m_toplevelResource = nullptr; // READ-ONLY.
+    WP<CXDGToplevelResource>      m_toplevel;
+
+    friend class CXDGDecorationProtocol;
 };
 
 class CXDGDecorationProtocol : public IWaylandProtocol {
@@ -29,6 +36,9 @@ class CXDGDecorationProtocol : public IWaylandProtocol {
     CXDGDecorationProtocol(const wl_interface* iface, const int& ver, const std::string& name);
 
     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
+
+    // The mode last configured for the toplevel, or none when it has no decoration object.
+    std::optional<zxdgToplevelDecorationV1Mode> modeFor(SP<CXDGToplevelResource> toplevel) const;
 
   private:
     void onManagerResourceDestroy(wl_resource* res);

@@ -25,6 +25,7 @@ namespace Desktop::View {
         SGeometryHints         geometryHints(eBackendState state) const override;
         SBackendMetadata       metadata() const override;
         SBackendTraits         traits() const override;
+        bool                   wantsServerDecorations() const override;
         double                 surfaceScale() const override;
         Vector2D               reportedSize() const override;
 

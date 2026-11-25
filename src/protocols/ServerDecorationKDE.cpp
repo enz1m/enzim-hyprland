@@ -1,5 +1,14 @@
 #include "ServerDecorationKDE.hpp"
 #include "core/Compositor.hpp"
+#include "../desktop/view/WLSurface.hpp"
+#include "../desktop/view/window/Window.hpp"
+#include "../desktop/view/window/WindowPresentation.hpp"
+
+static void refreshWindowDecorations(SP<CWLSurfaceResource> surface) {
+    const auto VIEW = surface ? Desktop::View::CWLSurface::fromResource(surface) : nullptr;
+    if (const auto WINDOW = VIEW ? Desktop::View::CWindow::fromView(VIEW->view()) : nullptr)
+        WINDOW->presentation().onDecorationModeChanged();
+}
 
 CServerDecorationKDE::CServerDecorationKDE(SP<COrgKdeKwinServerDecoration> resource_, SP<CWLSurfaceResource> surf_) : m_surf(surf_), m_resource(resource_) {
     if UNLIKELY (!good())
@@ -11,17 +20,20 @@ CServerDecorationKDE::CServerDecorationKDE(SP<COrgKdeKwinServerDecoration> resou
         if (m_requestsSent > 3)
             return; // don't start a tug of war
 
-        auto sendMode = kdeModeOnRequestCSD(mode);
-        m_resource->sendMode(sendMode);
-        m_mostRecentlySent      = sendMode;
         m_mostRecentlyRequested = mode;
         m_requestsSent++;
+        sendMode(kdeModeOnRequestCSD(mode));
     });
 
-    // we send this and ignore request_mode.
-    auto sendMode = kdeDefaultModeCSD();
-    m_resource->sendMode(sendMode);
-    m_mostRecentlySent = sendMode;
+    sendMode(kdeDefaultModeCSD());
+}
+
+void CServerDecorationKDE::sendMode(uint32_t mode) {
+    m_resource->sendMode(mode);
+    const bool CHANGED = m_mostRecentlySent != mode;
+    m_mostRecentlySent = mode;
+    if (CHANGED)
+        refreshWindowDecorations(m_surf);
 }
 
 bool CServerDecorationKDE::good() {
@@ -33,6 +45,8 @@ uint32_t CServerDecorationKDE::kdeDefaultModeCSD() {
 }
 
 uint32_t CServerDecorationKDE::kdeModeOnRequestCSD(uint32_t modeRequestedByClient) {
+    if (modeRequestedByClient == ORG_KDE_KWIN_SERVER_DECORATION_MANAGER_MODE_CLIENT)
+        return ORG_KDE_KWIN_SERVER_DECORATION_MANAGER_MODE_CLIENT;
     return kdeDefaultModeCSD();
 }
 
@@ -63,7 +77,21 @@ void CServerDecorationKDEProtocol::onManagerResourceDestroy(wl_resource* res) {
 }
 
 void CServerDecorationKDEProtocol::destroyResource(CServerDecorationKDE* hayperlaaaand) {
+    const auto SURFACE = hayperlaaaand->m_surf;
     std::erase_if(m_decos, [&](const auto& other) { return other.get() == hayperlaaaand; });
+    refreshWindowDecorations(SURFACE);
+}
+
+std::optional<uint32_t> CServerDecorationKDEProtocol::modeFor(SP<CWLSurfaceResource> surface) const {
+    if (!surface)
+        return std::nullopt;
+
+    for (const auto& decoration : m_decos) {
+        if (decoration->m_surf == surface)
+            return decoration->m_mostRecentlySent;
+    }
+
+    return std::nullopt;
 }
 
 void CServerDecorationKDEProtocol::createDecoration(COrgKdeKwinServerDecorationManager* pMgr, uint32_t id, wl_resource* surf) {

@@ -296,6 +296,21 @@ SBackendTraits CX11Backend::traits() const {
     return m_traits;
 }
 
+bool CX11Backend::wantsServerDecorations() const {
+    const auto SURFACE = m_xwaylandSurface.lock();
+    if (!SURFACE || SURFACE->m_overrideRedirect || SURFACE->m_motifTitleBar == false)
+        return false;
+
+#ifndef NO_XWAYLAND
+    // Toolkit-typed windows other than these are menus, tooltips, docks and splash screens.
+    static const std::array FRAMED_TYPES = {HYPRATOMS["_NET_WM_WINDOW_TYPE_NORMAL"], HYPRATOMS["_NET_WM_WINDOW_TYPE_DIALOG"]};
+    if (!SURFACE->m_atoms.empty() && std::ranges::none_of(SURFACE->m_atoms, [](const auto atom) { return std::ranges::find(FRAMED_TYPES, atom) != FRAMED_TYPES.end(); }))
+        return false;
+#endif
+
+    return true;
+}
+
 double CX11Backend::surfaceScale() const {
     static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
 

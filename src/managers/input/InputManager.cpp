@@ -1,5 +1,6 @@
 #include "InputManager.hpp"
 #include "../../desktop/view/window/WindowPresentation.hpp"
+#include "../../render/decorations/CHyprTitleBarDecoration.hpp"
 #include "../../Compositor.hpp"
 #include <aquamarine/output/Output.hpp>
 #include <cstdint>
@@ -858,6 +859,8 @@ void CInputManager::setClickMode(eClickBehaviorMode mode) {
 }
 
 void CInputManager::processMouseDownNormal(const IPointer::SButtonEvent& e, SP<IPointer> mouse) {
+    if (e.state == WL_POINTER_BUTTON_STATE_PRESSED)
+        CHyprTitleBarDecoration::notePress();
 
     // notify the keybind manager
     static auto PPASSMOUSE        = CConfigValue<Config::INTEGER>("binds:pass_mouse_when_bound");

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <vector>
 #include <cstdint>
 #include "WaylandProtocol.hpp"
@@ -22,6 +23,7 @@ class CServerDecorationKDE {
     uint32_t                        kdeDefaultModeCSD();
     uint32_t                        kdeModeOnRequestCSD(uint32_t modeRequestedByClient);
     uint32_t                        kdeModeOnReleaseCSD();
+    void                            sendMode(uint32_t mode);
 
     SP<COrgKdeKwinServerDecoration> m_resource;
 
@@ -33,6 +35,9 @@ class CServerDecorationKDEProtocol : public IWaylandProtocol {
     CServerDecorationKDEProtocol(const wl_interface* iface, const int& ver, const std::string& name);
 
     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
+
+    // The mode last sent for the surface, or none when it has no decoration object.
+    std::optional<uint32_t> modeFor(SP<CWLSurfaceResource> surface) const;
 
   private:
     uint32_t kdeDefaultManagerModeCSD();

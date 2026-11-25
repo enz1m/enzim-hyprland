@@ -40,8 +40,9 @@ class CTexPassElement : public IPassElement {
         float                  overallA = 1.F;
         CRegion                damage;
         bool                   useProvidedDamage = false;
-        int                    round             = 0;
-        float                  roundingPower     = 2.0f;
+        int                    round                = 0;
+        float                  roundingPower        = 2.0f;
+        int                    roundingTopExtension = 0;
         CBox                   clipBox;
         bool                   blur           = false;
         bool                   forceBlurBlend = false;

@@ -11,7 +11,8 @@ enum eDecorationType : int8_t {
     DECORATION_SHADOW,
     DECORATION_INNER_GLOW,
     DECORATION_BORDER,
-    DECORATION_CUSTOM
+    DECORATION_CUSTOM,
+    DECORATION_TITLEBAR
 };
 
 enum eDecorationLayer : uint8_t {

@@ -175,9 +175,11 @@ namespace Render::GL {
             float                  a             = 1.F;
             int                    round         = 0;
             float                  roundingPower = 2.F;
-            bool                   discardActive = false;
-            bool                   allowCustomUV = false;
-            bool                   allowDim      = true;
+            // Moves the rounded box's top edge up by this many pixels, leaving the top corners square.
+            int                    roundingTopExtension = 0;
+            bool                   discardActive        = false;
+            bool                   allowCustomUV        = false;
+            bool                   allowDim             = true;
             bool                   noAA          = false; // unused
             uint8_t                wrapX = WRAP_CLAMP_TO_EDGE, wrapY = WRAP_CLAMP_TO_EDGE;
             bool                   cmBackToSRGB   = false;

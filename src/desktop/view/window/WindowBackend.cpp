@@ -12,6 +12,10 @@ bool IWindowBackend::isX11() const {
     return type() == eBackendType::WINDOW_BACKEND_X11;
 }
 
+bool IWindowBackend::wantsServerDecorations() const {
+    return false;
+}
+
 void CWindowConfigureAckTracker::add(uint32_t serial, const Vector2D& size) {
     m_pending.emplace_back(serial, size);
 }

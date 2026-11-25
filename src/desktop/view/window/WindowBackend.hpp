@@ -113,6 +113,8 @@ namespace Desktop::View {
         virtual SGeometryHints         geometryHints(eBackendState state) const = 0;
         virtual SBackendMetadata       metadata() const                         = 0;
         virtual SBackendTraits         traits() const                           = 0;
+        // Whether the client draws no frame of its own and expects the compositor's title bar.
+        virtual bool                   wantsServerDecorations() const;
         virtual double                 surfaceScale() const                     = 0;
         virtual Vector2D               reportedSize() const                     = 0;
 
