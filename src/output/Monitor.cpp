@@ -400,13 +400,18 @@ void CMonitor::onDisconnect(bool destroy) {
     if (g_pHyprRenderer && g_pHyprRenderer->glBackend())
         g_pHyprRenderer->glBackend()->destroyMonitorResources(m_self);
 
-    // Cleanup everything. Move windows back, snap cursor, shit.
-    PHLMONITOR BACKUPMON = nullptr;
-    for (auto const& m : State::monitorState()->monitors()) {
-        if (m.get() != this) {
-            BACKUPMON = m;
-            break;
-        }
+    const auto CURSOR           = Pointer::mgr()->untransformedPosition();
+    const bool HAD_FOCUS        = Desktop::focusState()->monitor() == m_self;
+    const auto ACTIVE_WORKSPACE = m_activeWorkspace;
+    PHLMONITOR backupMonitor;
+    bool       cursorOnSurvivor = false;
+    for (const auto& monitor : State::monitorState()->monitors()) {
+        if (monitor.get() == this || !monitor->m_enabled || monitor->isMirror())
+            continue;
+
+        if (!backupMonitor)
+            backupMonitor = monitor;
+        cursorOnSurvivor |= monitor->logicalBox().containsPoint(CURSOR);
     }
 
     // remove mirror
@@ -447,9 +452,20 @@ void CMonitor::onDisconnect(bool destroy) {
 
     State::Workspace::monitorDisconnected(m_self.lock());
 
-    if (BACKUPMON) {
-        // snap cursor
-        Pointer::pointerController()->warpTo(BACKUPMON->m_position + BACKUPMON->m_transformedSize / 2.F, true);
+    if (backupMonitor) {
+        if (!cursorOnSurvivor)
+            Pointer::mgr()->warpTo(backupMonitor->middle());
+
+        if (HAD_FOCUS) {
+            Desktop::focusState()->rawMonitorFocus(backupMonitor);
+            if (ACTIVE_WORKSPACE && ACTIVE_WORKSPACE->m_monitor == backupMonitor) {
+                m_activeWorkspace.reset();
+                backupMonitor->changeWorkspace(ACTIVE_WORKSPACE, false, true, g_pSessionLockManager->isSessionLocked());
+                Animation::Workspace::startAnimation(ACTIVE_WORKSPACE, Animation::Workspace::ANIMATION_TYPE_IN, true, true);
+            }
+        }
+        if (!cursorOnSurvivor || HAD_FOCUS)
+            g_pInputManager->refocus();
     } else {
         Desktop::focusState()->surface().reset();
         Desktop::focusState()->window().reset();
@@ -468,9 +484,6 @@ void CMonitor::onDisconnect(bool destroy) {
         if (!m_state.commit())
             LOG(Log::WARN, "state.commit() failed in CMonitor::onDisconnect");
     }
-
-    if (Desktop::focusState()->monitor() == m_self)
-        Desktop::focusState()->rawMonitorFocus(BACKUPMON);
 
     if (g_pHyprRenderer->m_mostHzMonitor == m_self) {
         int        mostHz         = 0;
@@ -1651,9 +1664,7 @@ void CMonitor::moveTo(const Vector2D& pos) {
 
     m_position = pos;
 
-    if (OLD_POSITION == Vector2D{-1, -1})
-        return;
-
+    // Reconnecting workspaces can already have floating windows at the provisional origin.
     const auto DELTA = pos - OLD_POSITION;
 
     for (const auto& w : Desktop::windowState()->windows()) {
