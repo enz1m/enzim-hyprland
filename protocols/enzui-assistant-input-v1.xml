@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="enzui_assistant_input_v1">
+  <copyright>SPDX-License-Identifier: MIT</copyright>
+  <interface name="enzui_assistant_input_v1" version="2">
+    <description summary="scope virtual devices to an Assistant portal session">
+      Only the remote desktop portal can bind this interface. Bind once per
+      Assistant session. Attach both devices before forwarding any EIS input.
+      Destroy the object after closing the session and its devices, including
+      when the compositor requests revocation.
+    </description>
+    <request name="attach">
+      <arg name="session" type="string"/>
+      <arg name="pointer_id" type="uint"/>
+      <arg name="keyboard_id" type="uint"/>
+    </request>
+    <request name="destroy" type="destructor"/>
+    <event name="attached">
+      <arg name="accepted" type="uint"/>
+    </event>
+    <event name="revoked"/>
+    <request name="verify_session" since="2">
+      <description summary="check the Shell's pending Assistant session">
+        Check the exact portal session path registered by the admitted Shell.
+        Verification does not attach input devices or grant access.
+      </description>
+      <arg name="session" type="string"/>
+    </request>
+    <event name="session_verified" since="2">
+      <arg name="accepted" type="uint"/>
+    </event>
+  </interface>
+</protocol>

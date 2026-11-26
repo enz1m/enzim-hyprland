@@ -2560,6 +2560,7 @@ bool IHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor, std::opt
         .tearing           = pMonitor->m_output->state->state().presentationMode == Aquamarine::AQ_OUTPUT_PRESENTATION_IMMEDIATE,
         .vrr               = pMonitor->m_vrrActive,
         .copyFBPrepared    = staged ? staged->copyFBPrepared : pMonitor->needsACopyFB(),
+        .renderedLocked    = staged ? staged->renderedLocked : g_pSessionLockManager->isSessionLocked(),
     };
 
     const auto result = pMonitor->m_commitCoordinator->submit(std::move(frame));

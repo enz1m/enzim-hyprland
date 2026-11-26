@@ -1,3 +1,4 @@
+#include "ProtocolManager.hpp"
 #include "SessionLockManager.hpp"
 #include "../Compositor.hpp"
 #include "../config/ConfigValue.hpp"
@@ -66,6 +67,7 @@ void CSessionLockManager::onNewSessionLock(SP<CSessionLock> pLock) {
 
     LOG(Log::DEBUG, "Session got locked by {:x}", (uintptr_t)pLock.get());
     // enzUI: capture and virtual input end when the session locks.
+    enzuiRevokeAssistantControl();
     enzuiRevokePrivileged();
     PROTO::inputCapture->forceRelease();
 

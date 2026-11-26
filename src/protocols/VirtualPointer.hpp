@@ -41,9 +41,18 @@ class CVirtualPointerV1Resource {
 
     PHLMONITORREF m_boundOutput;
 
+    void          setAssistantScoped();
+    void          revoke();
+    void          releasePressed();
+
   private:
+    friend class CVirtualPointerProtocol;
+    bool                                m_assistantScoped = false;
+    bool                                m_revoked         = false;
     SP<CZwlrVirtualPointerV1>           m_resource;
 
+    void                                destroy();
+    std::vector<uint32_t>               m_pressed;
     uint32_t                            m_axis = 0;
 
     std::array<IPointer::SAxisEvent, 2> m_axisEvents;
@@ -55,6 +64,8 @@ class CVirtualPointerProtocol : public IWaylandProtocol {
     CVirtualPointerProtocol(const wl_interface* iface, const int& ver, const std::string& name);
 
     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
+    SP<CVirtualPointerV1Resource> device(wl_client* client, uint32_t id);
+    void                          releaseForClient(const wl_client* client);
 
     struct {
         CSignalT<SP<CVirtualPointerV1Resource>> newPointer;

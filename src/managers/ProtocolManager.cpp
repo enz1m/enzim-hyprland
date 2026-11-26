@@ -24,6 +24,7 @@
 #include "../protocols/SessionLock.hpp"
 #include "../protocols/InputMethodV2.hpp"
 #include "../protocols/EnzuiTextCommit.hpp"
+#include "enzui-assistant-input-v1.hpp"
 #include "../protocols/VirtualKeyboard.hpp"
 #include "../protocols/VirtualPointer.hpp"
 #include "../protocols/OutputManagement.hpp"
@@ -74,6 +75,9 @@
 #include "../protocols/XDGForeignV2.hpp"
 
 #include "../output/Monitor.hpp"
+#include "../state/MonitorState.hpp"
+#include "../desktop/view/LayerSurface.hpp"
+#include "../ipc/s2/S2.hpp"
 #include "../event/EventBus.hpp"
 #include "../render/Renderer.hpp"
 #include "../Compositor.hpp"
@@ -129,6 +133,20 @@ void CProtocolManager::onMonitorModeChange(PHLMONITOR pMonitor) {
         PROTO::colorManagement->onImagePreferredChanged(0);
     }
 }
+
+namespace EnzuiAdmission {
+    void bindAssistantInput(wl_client* client, uint32_t version, uint32_t id);
+}
+
+class CEnzuiAssistantInputProtocol : public IWaylandProtocol {
+  public:
+    using IWaylandProtocol::IWaylandProtocol;
+    void bindManager(wl_client* client, void*, uint32_t version, uint32_t id) override {
+        EnzuiAdmission::bindAssistantInput(client, version, id);
+    }
+};
+
+static UP<CEnzuiAssistantInputProtocol> assistantInputProtocol;
 
 CProtocolManager::CProtocolManager() {
 
@@ -191,6 +209,7 @@ CProtocolManager::CProtocolManager() {
     PROTO::lockNotify          = makeUnique<CLockNotifyProtocol>(&hyprland_lock_notifier_v1_interface, 1, "IdleNotify");
     PROTO::sessionLock         = makeUnique<CSessionLockProtocol>(&ext_session_lock_manager_v1_interface, 1, "SessionLock");
     PROTO::ime                 = makeUnique<CInputMethodV2Protocol>(&zwp_input_method_manager_v2_interface, 1, "IMEv2");
+    assistantInputProtocol     = makeUnique<CEnzuiAssistantInputProtocol>(&enzui_assistant_input_v1_interface, 2, "EnzuiAssistantInput");
     PROTO::enzuiTextCommit     = makeUnique<CEnzuiTextCommitProtocol>(&enzui_text_commit_v1_interface, 1, "EnzuiTextCommit");
     PROTO::virtualKeyboard     = makeUnique<CVirtualKeyboardProtocol>(&zwp_virtual_keyboard_manager_v1_interface, 1, "VirtualKeyboard");
     PROTO::virtualPointer      = makeUnique<CVirtualPointerProtocol>(&zwlr_virtual_pointer_manager_v1_interface, 2, "VirtualPointer");
@@ -302,6 +321,7 @@ CProtocolManager::~CProtocolManager() {
     PROTO::lockNotify.reset();
     PROTO::sessionLock.reset();
     PROTO::ime.reset();
+    assistantInputProtocol.reset();
     PROTO::enzuiTextCommit.reset();
     PROTO::virtualKeyboard.reset();
     PROTO::virtualPointer.reset();
@@ -422,9 +442,7 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 // or an approved input method (input method and its keyboard fallback).
 // Executable admission compares /proc/PID/exe against approved inodes and
 // disqualifies loader injection. Text commits use a separate allowlist.
-// Locking revokes capture and input connections other than the shell.
-// Input methods and text-commit clients keep their connections, with their
-// requests gated while locked.
+// Locking revokes helper connections and suspends the remote desktop portal’s capture and input.
 //
 // Compositor control requests and dev.enzui.* application ids need the same
 // kind of identity: see controlAllowed and enzuiAdmitAppId.
@@ -521,6 +539,7 @@ namespace EnzuiAdmission {
     struct SAdmitted {
         wl_listener destroy;
         uint8_t     kinds = 0;
+        bool             portalInput = false;
         int         peerHandle = -1;
         wl_event_source* exitSource = nullptr;
         wl_client*  client = nullptr;
@@ -531,6 +550,15 @@ namespace EnzuiAdmission {
     static pid_t                                         shellPid   = 0;
     static unsigned long long                            shellStart = 0;
     static CFileDescriptor                               shellHandle;
+    static std::string                                      assistantGeneration;
+    static std::string                                      assistantSession;
+    static pid_t                                            assistantOwner      = 0;
+    static unsigned long long                               assistantOwnerStart = 0;
+    static std::vector<UP<CEnzuiAssistantInputV1>>          assistantBindings;
+    static CEnzuiAssistantInputV1*                          assistantRoute = nullptr;
+    static WP<CVirtualPointerV1Resource>                    assistantPointer;
+    static WP<CVirtualKeyboardV1Resource>                   assistantKeyboard;
+    static wl_event_source*                                 assistantCloseTimer = nullptr;
     static dev_t                                         shellDevice = 0;
     static ino_t                                         shellInode = 0;
 
@@ -805,6 +833,8 @@ namespace EnzuiAdmission {
     }
 
     static int peerExited(int, uint32_t, void* data) {
+        if (!assistantGeneration.empty() && !pidfdAlive(shellHandle.get()))
+            enzuiRevokeAssistantControl();
         wl_client_destroy(static_cast<SAdmitted*>(data)->client);
         return 0;
     }
@@ -818,6 +848,7 @@ namespace EnzuiAdmission {
         if (pid <= 0 || !readProc(pid, proc))
             return 0;
         uint8_t kinds = 0;
+        bool    portalInput = false;
         if (claimShell(pid, proc.start, owner.handle.get()))
             kinds |= KIND_INPUT;
         if (!injected(pid)) {
@@ -829,7 +860,8 @@ namespace EnzuiAdmission {
                 kinds |= KIND_INPUT_METHOD;
             if (exeInList(pid, "ENZUI_TEXT_COMMIT_EXES"))
                 kinds |= KIND_TEXT_COMMIT;
-            if (exeInList(pid, "ENZUI_PORTAL_INPUT_EXES") && portalOnSessionBus(pid))
+            portalInput = exeInList(pid, "ENZUI_PORTAL_INPUT_EXES") && portalOnSessionBus(pid);
+            if (portalInput)
                 kinds |= KIND_INPUT;
             if (exeInList(pid, "ENZUI_PORTAL_HELPER_EXES") && exeInList(proc.ppid, "ENZUI_PORTAL_EXES") && !injected(proc.ppid) && portalOnSessionBus(proc.ppid))
                 kinds |= KIND_CAPTURE;
@@ -856,6 +888,7 @@ namespace EnzuiAdmission {
         if (kinds) {
             auto* entry            = new SAdmitted;
             entry->kinds           = kinds;
+            entry->portalInput     = portalInput;
             entry->client          = const_cast<wl_client*>(client);
             entry->peerHandle      = fcntl(owner.handle.get(), F_DUPFD_CLOEXEC, 3);
             if (entry->peerHandle >= 0)
@@ -1066,6 +1099,107 @@ namespace EnzuiAdmission {
         return writingCommand(payload.substr(0, split), split == std::string_view::npos ? std::string_view{} : payload.substr(split + 1));
     }
 
+    static bool indicatorVisible() {
+        const auto& monitors = State::monitorState()->monitors();
+        return !monitors.empty() && std::ranges::all_of(monitors, [](const auto& monitor) {
+            return std::ranges::any_of(monitor->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY],
+                                       [](const auto& layer) { return layer && layer->m_namespace == ENZUI_ASSISTANT_INDICATOR && layer->mapped() && layer->acceptsInput(); });
+        });
+    }
+
+    static bool portalInputClient(const wl_client* client) {
+        const auto entry = admitted.find(client);
+        return entry != admitted.end() && entry->second->portalInput && pidfdAlive(entry->second->peerHandle);
+    }
+
+    static void stopAssistantDevices() {
+        if (auto pointer = std::exchange(assistantPointer, {}).lock())
+            pointer->revoke();
+        if (auto keyboard = std::exchange(assistantKeyboard, {}).lock())
+            keyboard->revoke();
+    }
+
+    static void removeAssistantBinding(CEnzuiAssistantInputV1* resource) {
+        if (assistantRoute == resource) {
+            assistantRoute = nullptr;
+            if (auto* timer = std::exchange(assistantCloseTimer, nullptr))
+                wl_event_source_remove(timer);
+            stopAssistantDevices();
+            enzuiRevokeAssistantControl();
+        }
+        std::erase_if(assistantBindings, [resource](const auto& binding) { return binding.get() == resource; });
+    }
+
+    static bool pendingAssistantSession(const wl_client* client, std::string_view session) {
+        return portalInputClient(client) && !assistantRoute && !assistantGeneration.empty() && assistantSession == session && assistantOwner == shellPid &&
+            assistantOwnerStart == shellStart && pidfdAlive(shellHandle.get()) && !g_pSessionLockManager->isSessionLocked();
+    }
+
+    void bindAssistantInput(wl_client* client, uint32_t version, uint32_t id) {
+        const auto binding = assistantBindings.emplace_back(makeUnique<CEnzuiAssistantInputV1>(client, version, id)).get();
+        if (!binding->resource()) {
+            assistantBindings.pop_back();
+            wl_client_post_no_memory(client);
+            return;
+        }
+        binding->setDestroy(removeAssistantBinding);
+        binding->setOnDestroy(removeAssistantBinding);
+        binding->setVerifySession(
+            [](CEnzuiAssistantInputV1* resource, const char* session) { resource->sendSessionVerified(pendingAssistantSession(resource->client(), session)); });
+        binding->setAttach([](CEnzuiAssistantInputV1* resource, const char* session, uint32_t pointerId, uint32_t keyboardId) {
+            auto* client = resource->client();
+            if (!pendingAssistantSession(client, session) || !indicatorVisible()) {
+                resource->sendAttached(0);
+                return;
+            }
+
+            const auto pointer  = PROTO::virtualPointer->device(client, pointerId);
+            const auto keyboard = PROTO::virtualKeyboard->device(client, keyboardId);
+            if (!pointer || !keyboard) {
+                resource->sendAttached(0);
+                return;
+            }
+
+            pointer->setAssistantScoped();
+            keyboard->setAssistantScoped();
+            assistantRoute    = resource;
+            assistantPointer  = pointer;
+            assistantKeyboard = keyboard;
+            resource->sendAttached(1);
+        });
+    }
+
+    static std::string assistantCommand(std::istringstream& words, const std::string& action) {
+        std::string generation, session, extra;
+        if (!(words >> generation) || generation.size() != 32 || generation.find_first_not_of("0123456789abcdef") != std::string::npos)
+            return "error: invalid assistant control generation";
+        if (action == "arm" && (!(words >> session) || !session.starts_with("/org/freedesktop/portal/desktop/session/") || !session.ends_with("/enzui_assistant_" + generation)))
+            return "error: invalid assistant portal session";
+        if (words >> extra)
+            return "error: unexpected assistant control arguments";
+        if (action == "disarm") {
+            if (assistantGeneration == generation)
+                enzuiRevokeAssistantControl();
+            return "ok";
+        }
+        if (g_pSessionLockManager->isSessionLocked())
+            return "error: session locked";
+        if (action == "arm" && (assistantOwner != shellPid || assistantOwnerStart != shellStart))
+            enzuiRevokeAssistantControl();
+        if (action == "arm" && !assistantRoute && assistantGeneration.empty()) {
+            assistantOwner      = shellPid;
+            assistantOwnerStart = shellStart;
+            assistantGeneration = generation;
+            assistantSession    = session;
+            return "ok";
+        }
+        if (assistantGeneration != generation)
+            return "error: assistant control revoked";
+        if (action == "pending" || (action == "visible" && indicatorVisible()) || (action == "scoped" && assistantRoute && indicatorVisible()))
+            return "ok";
+        return "error: assistant indicator or input route unavailable";
+    }
+
     static std::string command(const IPC::Socket1::SRequest& request) {
         const pid_t pid = request.pid;
         SProc       proc;
@@ -1074,6 +1208,8 @@ namespace EnzuiAdmission {
         std::istringstream words(request.command);
         std::string        verb, action;
         words >> verb >> action;
+        if (verb == "enzuiassistant")
+            return assistantCommand(words, action);
         if (action != "intent")
             return "error: unknown request";
         std::string kindsText, path;
@@ -1119,6 +1255,15 @@ static bool enzuiLockBlocks(const wl_client* client) {
     return g_pSessionLockManager && g_pSessionLockManager->isSessionLocked() && !EnzuiAdmission::isShell(client);
 }
 
+bool enzuiAssistantInputEnabled() {
+    return !EnzuiAdmission::assistantGeneration.empty() && EnzuiAdmission::assistantOwner == EnzuiAdmission::shellPid &&
+        EnzuiAdmission::assistantOwnerStart == EnzuiAdmission::shellStart && EnzuiAdmission::pidfdAlive(EnzuiAdmission::shellHandle.get());
+}
+
+bool enzuiAllowsVirtualPointerEvents(const wl_client* client) {
+    return !EnzuiAdmission::enforcing() || !enzuiLockBlocks(client);
+}
+
 bool enzuiAllowsVirtualKeyboardEvents(const wl_client* client) {
     if (!EnzuiAdmission::enforcing())
         return true;
@@ -1137,6 +1282,10 @@ bool enzuiAllowsVirtualKeyboardEvents(const wl_client* client) {
 }
 
 bool enzuiAllowsGlobal(const wl_client* client, const wl_global* global) {
+    if (wl_global_get_interface(global) == &enzui_assistant_input_v1_interface) {
+        EnzuiAdmission::decide(client);
+        return EnzuiAdmission::portalInputClient(client);
+    }
     auto kind = EnzuiAdmission::kindOf(global);
     if (kind == EnzuiAdmission::KIND_TEXT_COMMIT)
         return enzuiAllowsTextCommit(client);
@@ -1164,12 +1313,44 @@ std::string enzuiAdmitAppId(const wl_client* client, std::string id) {
     return "";
 }
 
+bool enzuiAllowsAssistantIndicator(const wl_client* client) {
+    return EnzuiAdmission::enforcing() && EnzuiAdmission::isShell(client);
+}
+
+bool enzuiRevokeAssistantControl() {
+    if (EnzuiAdmission::assistantGeneration.empty())
+        return false;
+    const auto generation = std::exchange(EnzuiAdmission::assistantGeneration, {});
+    EnzuiAdmission::assistantSession.clear();
+    EnzuiAdmission::stopAssistantDevices();
+    if (auto* route = EnzuiAdmission::assistantRoute) {
+        route->sendRevoked();
+        const auto disconnect = [](void* data) {
+            auto* binding = static_cast<CEnzuiAssistantInputV1*>(data);
+            LOG(Log::WARN, "enzUI Assistant: portal session close timed out, disconnecting its Wayland route");
+            wl_client_destroy(binding->client());
+            return 0;
+        };
+        auto*& timer = EnzuiAdmission::assistantCloseTimer;
+        timer        = wl_event_loop_add_timer(g_pCompositor->m_wlEventLoop, disconnect, route);
+        if (!timer || wl_event_source_timer_update(timer, 500) < 0)
+            disconnect(route);
+    }
+    IPC::Socket2::sock()->postEvent({.event = "enzuiassistantrevoked", .data = generation});
+    return true;
+}
+
 void enzuiRevokePrivileged() {
     if (!EnzuiAdmission::enforcing())
         return;
     EnzuiAdmission::writingSelection = {};
     std::vector<wl_client*> revoked;
     for (const auto& [client, entry] : EnzuiAdmission::admitted) {
+        if (EnzuiAdmission::portalInputClient(client)) {
+            PROTO::virtualKeyboard->releaseForClient(client);
+            PROTO::virtualPointer->releaseForClient(client);
+            continue;
+        }
         if ((entry->kinds & ~(EnzuiAdmission::KIND_INPUT_METHOD | EnzuiAdmission::KIND_TEXT_COMMIT)) && !EnzuiAdmission::isShell(client))
             revoked.push_back(const_cast<wl_client*>(client));
     }
@@ -1187,6 +1368,11 @@ void enzuiRegisterAdmissionCommand() {
         .name    = "enzuiwriting",
         .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
         .handler = [](const IPC::Socket1::SRequest& request) -> IPC::Socket1::SResponse { return EnzuiAdmission::writing(request); },
+    });
+    IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
+        .name    = "enzuiassistant",
+        .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
+        .handler = [](const IPC::Socket1::SRequest& request) -> IPC::Socket1::SResponse { return EnzuiAdmission::command(request); },
     });
     IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
         .name    = "enzuiadmit",

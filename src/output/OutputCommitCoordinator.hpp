@@ -32,6 +32,7 @@ namespace Monitor {
             bool                                     tearing           = false;
             bool                                     vrr               = false;
             bool                                     copyFBPrepared    = false;
+            bool                                     renderedLocked    = false;
             std::optional<uint32_t>                  previousFormat;
             uint64_t                                 id = 0;
         };
@@ -39,6 +40,7 @@ namespace Monitor {
         struct SStagedRender {
             CRegion damage;
             bool    copyFBPrepared = false;
+            bool    renderedLocked = false;
         };
 
         explicit COutputCommitCoordinator(CMonitor* monitor);

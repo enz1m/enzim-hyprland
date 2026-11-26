@@ -1,3 +1,4 @@
+#include "../managers/SessionLockManager.hpp"
 #include "OutputCommitCoordinator.hpp"
 
 #include "Monitor.hpp"
@@ -57,6 +58,7 @@ void COutputCommitCoordinator::stageRenderedDamage(const CRegion& damage, bool c
     m_stagedRender = SStagedRender{
         .damage         = damage,
         .copyFBPrepared = copyFBPrepared,
+        .renderedLocked = g_pSessionLockManager->isSessionLocked(),
     };
 }
 
@@ -193,7 +195,7 @@ void COutputCommitCoordinator::submitted(SFrame& frame, bool async) {
     if (!async && frame.kind == FRAME_COMPOSED)
         m_monitor->m_directScanoutIsActive = false;
 
-    if (!async && frame.kind == FRAME_COMPOSED && frame.copyFBPrepared && Screenshare::mgr())
+    if (!async && frame.kind == FRAME_COMPOSED && frame.copyFBPrepared && !frame.renderedLocked && Screenshare::mgr())
         Screenshare::mgr()->onOutputCommit(m_monitor->m_self.lock(), frame.renderedDamage);
 }
 
@@ -201,7 +203,7 @@ void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
     if (!ownsCommit(id))
         return;
 
-    if (presented && m_pending->kind == FRAME_COMPOSED && m_pending->copyFBPrepared && Screenshare::mgr())
+    if (presented && m_pending->kind == FRAME_COMPOSED && m_pending->copyFBPrepared && !m_pending->renderedLocked && Screenshare::mgr())
         Screenshare::mgr()->onOutputCommit(m_monitor->m_self.lock(), m_pending->renderedDamage);
 
     if (!presented) {

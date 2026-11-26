@@ -4,6 +4,7 @@
 #include "../../desktop/view/window/Window.hpp"
 #include "../../protocols/core/Seat.hpp"
 #include "../../state/MonitorState.hpp"
+#include "../SessionLockManager.hpp"
 
 using namespace Screenshare;
 
@@ -38,7 +39,7 @@ void CScreenshareManager::onOutputCommit(PHLMONITOR monitor, const CRegion& dama
         if (frame.expired() || !frame->m_shared || frame->done())
             return;
 
-        if (frame->m_session->monitor() != monitor)
+        if (frame->m_session->monitor() != monitor || g_pSessionLockManager->isSessionLocked())
             return;
 
         if (frame->m_session->m_type == SHARE_WINDOW) {

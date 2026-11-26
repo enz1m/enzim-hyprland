@@ -164,6 +164,7 @@ class CInputManager {
     PHLWINDOWREF                 m_forcedFocus;
 
     std::vector<SP<IKeyboard>>   m_keyboards;
+    WP<IKeyboard>                m_assistantEscapeKeyboard;
     std::vector<SP<IPointer>>    m_pointers;
     std::vector<SP<ITouch>>      m_touches;
     std::vector<SP<CTablet>>     m_tablets;

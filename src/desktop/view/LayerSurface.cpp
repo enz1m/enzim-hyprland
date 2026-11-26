@@ -1,3 +1,4 @@
+#include "../../managers/ProtocolManager.hpp"
 #include "LayerSurface.hpp"
 #include "../state/FocusState.hpp"
 #include "../state/FadingOutState.hpp"
@@ -22,6 +23,14 @@
 
 using namespace Desktop;
 using namespace Desktop::View;
+
+static void insertLayer(PHLMONITOR monitor, zwlrLayerShellV1Layer layer, const PHLLSREF& surface) {
+    auto&      layers   = monitor->m_layerSurfaceLayers[layer];
+    const auto position = layer == ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY && surface->m_namespace != ENZUI_ASSISTANT_INDICATOR ?
+        std::ranges::find_if(layers, [](const auto& item) { return item && item->m_namespace == ENZUI_ASSISTANT_INDICATOR; }) :
+        layers.end();
+    layers.insert(position, surface);
+}
 
 PHLLS CLayerSurface::create(SP<CLayerShellResource> resource) {
     PHLLS pLS = SP<CLayerSurface>(new CLayerSurface(resource));
@@ -54,7 +63,7 @@ PHLLS CLayerSurface::create(SP<CLayerShellResource> resource) {
         pMonitor = State::monitorState()->monitors().front();
 
     pLS->m_monitor = pMonitor;
-    pMonitor->m_layerSurfaceLayers[resource->m_current.layer].emplace_back(pLS);
+    insertLayer(pMonitor, resource->m_current.layer, pLS);
 
     LOG(Log::DEBUG, "LayerSurface {:x} (namespace {} layer {}) created on monitor {}", rc<uintptr_t>(resource.get()), resource->m_layerNamespace, sc<int>(pLS->m_layer),
         pMonitor->m_name);
@@ -232,6 +241,9 @@ void CLayerSurface::onMap() {
 }
 
 void CLayerSurface::onUnmap() {
+    if (m_namespace == ENZUI_ASSISTANT_INDICATOR)
+        enzuiRevokeAssistantControl();
+
     LOG(Log::DEBUG, "LayerSurface {:x} unmapped", rc<uintptr_t>(m_layerSurface.get()));
 
     IPC::Socket2::sock()->postEvent({.event = "closelayer", .data = m_layerSurface->m_layerNamespace});
@@ -328,7 +340,7 @@ void CLayerSurface::onCommit() {
 
             for (auto it = PMONITOR->m_layerSurfaceLayers[m_layer].begin(); it != PMONITOR->m_layerSurfaceLayers[m_layer].end(); it++) {
                 if (*it == m_self) {
-                    PMONITOR->m_layerSurfaceLayers[NEW_LAYER].emplace_back(*it);
+                    insertLayer(PMONITOR, NEW_LAYER, *it);
                     PMONITOR->m_layerSurfaceLayers[m_layer].erase(it);
                     break;
                 }

@@ -26,10 +26,16 @@ class CVirtualKeyboardV1Resource {
 
     std::string m_name = "";
 
+    void        setAssistantScoped();
+    void        revoke();
+    void        releasePressed();
+
   private:
+    friend class CVirtualKeyboardProtocol;
+    bool                      m_assistantScoped = false;
+    bool                      m_revoked         = false;
     SP<CZwpVirtualKeyboardV1> m_resource;
 
-    void                      releasePressed();
     void                      destroy();
 
     bool                      m_hasKeymap = false;
@@ -42,6 +48,8 @@ class CVirtualKeyboardProtocol : public IWaylandProtocol {
     CVirtualKeyboardProtocol(const wl_interface* iface, const int& ver, const std::string& name);
 
     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
+    SP<CVirtualKeyboardV1Resource> device(wl_client* client, uint32_t id);
+    void                           releaseForClient(const wl_client* client);
 
     struct {
         CSignalT<SP<CVirtualKeyboardV1Resource>> newKeyboard;

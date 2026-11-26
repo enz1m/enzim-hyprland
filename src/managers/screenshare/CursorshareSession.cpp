@@ -1,4 +1,5 @@
 #include "ScreenshareManager.hpp"
+#include "../SessionLockManager.hpp"
 #include "../../pointer/PointerManager.hpp"
 #include "../../protocols/core/Seat.hpp"
 #include "../permissions/DynamicPermissionManager.hpp"
@@ -123,7 +124,7 @@ void CCursorshareSession::render() {
 
     bool overlaps = Pointer::mgr()->getCursorBoxGlobal().overlaps(m_pendingFrame.sourceBoxCallback());
     g_pHyprRenderer->startRenderPass();
-    if (PERM != PERMISSION_RULE_ALLOW_MODE_ALLOW || !overlaps) {
+    if (g_pSessionLockManager->isSessionLocked() || PERM != PERMISSION_RULE_ALLOW_MODE_ALLOW || !overlaps) {
         // render black when not allowed
         g_pHyprRenderer->draw(CClearPassElement::SClearData{Colors::BLACK});
     } else if (!cursorImage.pBuffer || !cursorImage.surface || !cursorImage.bufferTex) {

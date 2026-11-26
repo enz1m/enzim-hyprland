@@ -4,6 +4,7 @@
 #include "../helpers/memory/Memory.hpp"
 #include "../helpers/signal/Signal.hpp"
 #include <unordered_map>
+#include <string_view>
 
 class CProtocolManager {
   public:
@@ -19,3 +20,10 @@ class CProtocolManager {
 };
 
 inline UP<CProtocolManager> g_pProtocolManager;
+
+inline constexpr std::string_view ENZUI_ASSISTANT_INDICATOR = "enzui-assistant-control";
+bool                              enzuiAllowsAssistantIndicator(const wl_client* client);
+bool                              enzuiRevokeAssistantControl();
+bool                              enzuiAllowsVirtualPointerEvents(const wl_client* client);
+bool                              enzuiAssistantInputEnabled();
+bool                              enzuiAllowsVirtualKeyboardEvents(const wl_client* client);

@@ -1,3 +1,4 @@
+#include "../managers/ProtocolManager.hpp"
 #include "LayerShell.hpp"
 #include "../Compositor.hpp"
 #include "../desktop/view/LayerSurface.hpp"
@@ -144,7 +145,7 @@ CLayerShellResource::CLayerShellResource(SP<CZwlrLayerSurfaceV1> resource_, SP<C
     });
 
     m_resource->setSetLayer([this](CZwlrLayerSurfaceV1* r, uint32_t layer) {
-        if (layer > ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY) {
+        if (layer > ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY || (m_layerNamespace == ENZUI_ASSISTANT_INDICATOR && layer != ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY)) {
             r->error(ZWLR_LAYER_SHELL_V1_ERROR_INVALID_LAYER, "Invalid layer");
             return;
         }
@@ -252,6 +253,11 @@ void CLayerShellProtocol::onGetLayerSurface(CZwlrLayerShellV1* pMgr, uint32_t id
 
     if UNLIKELY (layer > ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY) {
         pMgr->error(ZWLR_LAYER_SHELL_V1_ERROR_INVALID_LAYER, "Invalid layer");
+        return;
+    }
+
+    if (namespace_ == ENZUI_ASSISTANT_INDICATOR && (!PMONITOR || layer != ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY || !enzuiAllowsAssistantIndicator(CLIENT))) {
+        pMgr->error(-1, "Assistant indicator requires the registered Shell and an output");
         return;
     }
 

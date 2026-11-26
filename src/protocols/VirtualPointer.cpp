@@ -1,20 +1,18 @@
 #include "VirtualPointer.hpp"
+#include "../managers/ProtocolManager.hpp"
 #include "core/Output.hpp"
+#include "../helpers/time/Time.hpp"
 
 CVirtualPointerV1Resource::CVirtualPointerV1Resource(SP<CZwlrVirtualPointerV1> resource_, PHLMONITORREF boundOutput_) : m_boundOutput(boundOutput_), m_resource(resource_) {
     if UNLIKELY (!good())
         return;
 
-    m_resource->setDestroy([this](CZwlrVirtualPointerV1* r) {
-        m_events.destroy.emit();
-        PROTO::virtualPointer->destroyResource(this);
-    });
-    m_resource->setOnDestroy([this](CZwlrVirtualPointerV1* r) {
-        m_events.destroy.emit();
-        PROTO::virtualPointer->destroyResource(this);
-    });
+    m_resource->setDestroy([this](CZwlrVirtualPointerV1*) { destroy(); });
+    m_resource->setOnDestroy([this](CZwlrVirtualPointerV1*) { destroy(); });
 
     m_resource->setMotion([this](CZwlrVirtualPointerV1* r, uint32_t timeMs, wl_fixed_t dx, wl_fixed_t dy) {
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualPointerEvents(r->client()))
+            return;
         m_events.move.emit(IPointer::SMotionEvent{
             .timeMs  = timeMs,
             .delta   = {wl_fixed_to_double(dx), wl_fixed_to_double(dy)},
@@ -24,6 +22,8 @@ CVirtualPointerV1Resource::CVirtualPointerV1Resource(SP<CZwlrVirtualPointerV1> r
     });
 
     m_resource->setMotionAbsolute([this](CZwlrVirtualPointerV1* r, uint32_t timeMs, uint32_t x, uint32_t y, uint32_t xExtent, uint32_t yExtent) {
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualPointerEvents(r->client()))
+            return;
         if (!xExtent || !yExtent)
             return;
 
@@ -34,6 +34,14 @@ CVirtualPointerV1Resource::CVirtualPointerV1Resource(SP<CZwlrVirtualPointerV1> r
     });
 
     m_resource->setButton([this](CZwlrVirtualPointerV1* r, uint32_t timeMs, uint32_t button, uint32_t state) {
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualPointerEvents(r->client()))
+            return;
+        if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+            if (!std::ranges::contains(m_pressed, button))
+                m_pressed.push_back(button);
+        } else
+            std::erase(m_pressed, button);
+
         m_events.button.emit(IPointer::SButtonEvent{
             .timeMs = timeMs,
             .button = button,
@@ -42,7 +50,9 @@ CVirtualPointerV1Resource::CVirtualPointerV1Resource(SP<CZwlrVirtualPointerV1> r
     });
 
     m_resource->setAxis([this](CZwlrVirtualPointerV1* r, uint32_t timeMs, uint32_t axis_, wl_fixed_t value) {
-        if UNLIKELY (m_axis > WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualPointerEvents(r->client()))
+            return;
+        if UNLIKELY (axis_ > WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
             r->error(ZWLR_VIRTUAL_POINTER_V1_ERROR_INVALID_AXIS, "Invalid axis");
             return;
         }
@@ -53,6 +63,8 @@ CVirtualPointerV1Resource::CVirtualPointerV1Resource(SP<CZwlrVirtualPointerV1> r
     });
 
     m_resource->setFrame([this](CZwlrVirtualPointerV1* r) {
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualPointerEvents(r->client()))
+            return;
         for (size_t i = 0; i < m_axisEvents.size(); ++i) {
             if (!m_axisEventPending[i])
                 continue;
@@ -63,10 +75,16 @@ CVirtualPointerV1Resource::CVirtualPointerV1Resource(SP<CZwlrVirtualPointerV1> r
         m_events.frame.emit();
     });
 
-    m_resource->setAxisSource([this](CZwlrVirtualPointerV1* r, uint32_t source) { m_axisEvents[m_axis].source = sc<wl_pointer_axis_source>(source); });
+    m_resource->setAxisSource([this](CZwlrVirtualPointerV1* r, uint32_t source) {
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualPointerEvents(r->client()))
+            return;
+        m_axisEvents[m_axis].source = sc<wl_pointer_axis_source>(source);
+    });
 
     m_resource->setAxisStop([this](CZwlrVirtualPointerV1* r, uint32_t timeMs, uint32_t axis_) {
-        if UNLIKELY (m_axis > WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualPointerEvents(r->client()))
+            return;
+        if UNLIKELY (axis_ > WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
             r->error(ZWLR_VIRTUAL_POINTER_V1_ERROR_INVALID_AXIS, "Invalid axis");
             return;
         }
@@ -80,7 +98,9 @@ CVirtualPointerV1Resource::CVirtualPointerV1Resource(SP<CZwlrVirtualPointerV1> r
     });
 
     m_resource->setAxisDiscrete([this](CZwlrVirtualPointerV1* r, uint32_t timeMs, uint32_t axis_, wl_fixed_t value, int32_t discrete) {
-        if UNLIKELY (m_axis > WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualPointerEvents(r->client()))
+            return;
+        if UNLIKELY (axis_ > WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
             r->error(ZWLR_VIRTUAL_POINTER_V1_ERROR_INVALID_AXIS, "Invalid axis");
             return;
         }
@@ -94,6 +114,18 @@ CVirtualPointerV1Resource::CVirtualPointerV1Resource(SP<CZwlrVirtualPointerV1> r
     });
 }
 
+void CVirtualPointerV1Resource::releasePressed() {
+    m_axisEventPending.fill(false);
+    for (const auto button : std::exchange(m_pressed, {}))
+        m_events.button.emit({.timeMs = Time::millis(Time::steadyNow()), .button = button, .state = WL_POINTER_BUTTON_STATE_RELEASED});
+}
+
+void CVirtualPointerV1Resource::destroy() {
+    releasePressed();
+    m_events.destroy.emit();
+    PROTO::virtualPointer->destroyResource(this);
+}
+
 CVirtualPointerV1Resource::~CVirtualPointerV1Resource() {
     m_events.destroy.emit();
 }
@@ -103,7 +135,31 @@ bool CVirtualPointerV1Resource::good() {
 }
 
 wl_client* CVirtualPointerV1Resource::client() {
-    return m_resource->client();
+    return good() ? m_resource->client() : nullptr;
+}
+
+void CVirtualPointerV1Resource::setAssistantScoped() {
+    m_assistantScoped = true;
+}
+
+void CVirtualPointerV1Resource::revoke() {
+    m_revoked = true;
+    releasePressed();
+}
+
+SP<CVirtualPointerV1Resource> CVirtualPointerProtocol::device(wl_client* client, uint32_t id) {
+    const auto resource = wl_client_get_object(client, id);
+    if (!resource)
+        return {};
+    const auto found = std::ranges::find_if(m_pointers, [resource](const auto& device) { return device->m_resource->resource() == resource && !device->m_assistantScoped; });
+    return found == m_pointers.end() ? nullptr : *found;
+}
+
+void CVirtualPointerProtocol::releaseForClient(const wl_client* client) {
+    for (const auto& device : m_pointers) {
+        if (device->client() == client)
+            device->releasePressed();
+    }
 }
 
 CVirtualPointerProtocol::CVirtualPointerProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {

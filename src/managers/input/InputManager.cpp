@@ -3,6 +3,7 @@
 #include "../../desktop/view/window/WindowPresentation.hpp"
 #include "../../render/decorations/CHyprTitleBarDecoration.hpp"
 #include "../../Compositor.hpp"
+#include "../ProtocolManager.hpp"
 #include <aquamarine/output/Output.hpp>
 #include <cstdint>
 #include <hyprutils/math/Vector2D.hpp>
@@ -748,8 +749,20 @@ static bool isUserPress(const IPointer::SButtonEvent& event, const SP<IPointer>&
 }
 
 void CInputManager::onMouseButton(IPointer::SButtonEvent e, SP<IPointer> mouse) {
-    if (isUserPress(e, mouse))
+    if (isUserPress(e, mouse)) {
         PROTO::activation->invalidateInput();
+        if (e.button == BTN_LEFT) {
+            const auto cursor  = getMouseCoordsInternal();
+            const auto monitor = State::monitorState()->query().vec(cursor).run();
+            if (monitor) {
+                PHLLS    layer;
+                Vector2D local;
+                Desktop::viewState()->hitTest().layerSurfaceAt(cursor, &monitor->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY], &local, &layer);
+                if (layer && layer->m_namespace == ENZUI_ASSISTANT_INDICATOR)
+                    enzuiRevokeAssistantControl();
+            }
+        }
+    }
 
     Event::SCallbackInfo info;
     Event::bus()->m_events.input.mouse.button.emit(e, info);
@@ -1729,19 +1742,35 @@ void CInputManager::onKeyboardKey(const IKeyboard::SKeyEvent& event, SP<IKeyboar
     if (!pKeyboard->m_enabled || !pKeyboard->m_allowed)
         return;
 
-    const bool USER_PRESS = !pKeyboard->isVirtual() && event.state == WL_KEYBOARD_KEY_STATE_PRESSED;
+    const bool USER_PRESS      = !pKeyboard->isVirtual() && event.state == WL_KEYBOARD_KEY_STATE_PRESSED;
+    bool       assistantEscape = false;
+    if (event.keycode == KEY_ESC && !pKeyboard->isVirtual()) {
+        if (m_assistantEscapeKeyboard.lock() == pKeyboard) {
+            if (!USER_PRESS)
+                m_assistantEscapeKeyboard.reset();
+            assistantEscape = true;
+        } else if (USER_PRESS &&
+                   std::ranges::any_of(
+                       m_keyboards, [](const auto& keyboard) { return !keyboard->isVirtual() && keyboard->m_enabled && (keyboard->getModifiers() & Input::HL_MODIFIER_META); }) &&
+                   enzuiRevokeAssistantControl()) {
+            m_assistantEscapeKeyboard = pKeyboard;
+            assistantEscape           = true;
+        }
+    }
+
     if (USER_PRESS)
         PROTO::activation->invalidateInput();
 
-    const bool           DISALLOWACTION = pKeyboard->isVirtual() && shouldIgnoreVirtualKeyboard(pKeyboard);
+    const bool DISALLOWACTION = pKeyboard->isVirtual() && shouldIgnoreVirtualKeyboard(pKeyboard);
 
-    const auto           IME    = m_relay.m_inputMethod.lock();
-    const bool           HASIME = IME && IME->hasGrab() && m_relay.imeAllowed();
-    const bool           USEIME = HASIME && !DISALLOWACTION;
+    const auto IME    = m_relay.m_inputMethod.lock();
+    const bool HASIME = IME && IME->hasGrab() && m_relay.imeAllowed();
+    const bool USEIME = HASIME && !DISALLOWACTION;
 
-    Event::SCallbackInfo info;
+    // Policy observers need the consumed Escape to distinguish the chord from a lone Super tap.
+    Event::SCallbackInfo info{.cancelled = assistantEscape};
     Event::bus()->m_events.input.keyboard.key.emit(event, info);
-    if (info.cancelled)
+    if (assistantEscape || info.cancelled)
         return;
 
     PROTO::inputCapture->key(event.keycode, event.state);

@@ -1,4 +1,5 @@
 #include "VirtualKeyboard.hpp"
+#include "../managers/ProtocolManager.hpp"
 #include <filesystem>
 #include <sys/mman.h>
 #include "../config/ConfigValue.hpp"
@@ -41,7 +42,7 @@ CVirtualKeyboardV1Resource::CVirtualKeyboardV1Resource(SP<CZwpVirtualKeyboardV1>
     m_resource->setOnDestroy([this](CZwpVirtualKeyboardV1* r) { destroy(); });
 
     m_resource->setKey([this](CZwpVirtualKeyboardV1* r, uint32_t timeMs, uint32_t key, uint32_t state) {
-        if (!enzuiAllowsVirtualKeyboardEvents(r->client()))
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualKeyboardEvents(r->client()))
             return;
 
         if UNLIKELY (!m_hasKeymap) {
@@ -63,7 +64,7 @@ CVirtualKeyboardV1Resource::CVirtualKeyboardV1Resource(SP<CZwpVirtualKeyboardV1>
     });
 
     m_resource->setModifiers([this](CZwpVirtualKeyboardV1* r, uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group) {
-        if (!enzuiAllowsVirtualKeyboardEvents(r->client()))
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualKeyboardEvents(r->client()))
             return;
 
         if UNLIKELY (!m_hasKeymap) {
@@ -81,7 +82,7 @@ CVirtualKeyboardV1Resource::CVirtualKeyboardV1Resource(SP<CZwpVirtualKeyboardV1>
 
     m_resource->setKeymap([this](CZwpVirtualKeyboardV1* r, uint32_t fmt, int32_t fd, uint32_t len) {
         CFileDescriptor keymapFd{fd};
-        if (!enzuiAllowsVirtualKeyboardEvents(r->client()))
+        if (m_revoked || (m_assistantScoped && !enzuiAssistantInputEnabled()) || !enzuiAllowsVirtualKeyboardEvents(r->client()))
             return;
 
         auto xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -143,14 +144,39 @@ void CVirtualKeyboardV1Resource::releasePressed() {
     }
 
     m_pressed.clear();
+    m_events.modifiers.emit({});
 }
 
 void CVirtualKeyboardV1Resource::destroy() {
     const auto RELEASEPRESSED = Config::mgr()->getDeviceInt(m_name, "release_pressed_on_close", "input:virtualkeyboard:release_pressed_on_close");
-    if (RELEASEPRESSED)
+    if (m_assistantScoped || RELEASEPRESSED)
         releasePressed();
     m_events.destroy.emit();
     PROTO::virtualKeyboard->destroyResource(this);
+}
+
+void CVirtualKeyboardV1Resource::setAssistantScoped() {
+    m_assistantScoped = true;
+}
+
+void CVirtualKeyboardV1Resource::revoke() {
+    m_revoked = true;
+    releasePressed();
+}
+
+SP<CVirtualKeyboardV1Resource> CVirtualKeyboardProtocol::device(wl_client* client, uint32_t id) {
+    const auto resource = wl_client_get_object(client, id);
+    if (!resource)
+        return {};
+    const auto found = std::ranges::find_if(m_keyboards, [resource](const auto& device) { return device->m_resource->resource() == resource && !device->m_assistantScoped; });
+    return found == m_keyboards.end() ? nullptr : *found;
+}
+
+void CVirtualKeyboardProtocol::releaseForClient(const wl_client* client) {
+    for (const auto& device : m_keyboards) {
+        if (device->client() == client)
+            device->releasePressed();
+    }
 }
 
 CVirtualKeyboardProtocol::CVirtualKeyboardProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {
