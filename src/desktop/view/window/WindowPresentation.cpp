@@ -58,9 +58,9 @@ CWindowPresentation::CWindowPresentation(CWindow& window) : m_window(window), m_
 CWindowPresentation::~CWindowPresentation() = default;
 
 void CWindowPresentation::initialize() {
-    const auto WINDOW  = m_window.m_self.lock();
-    m_shadowDecoration = makeShared<CHyprDropShadowDecoration>(WINDOW);
-    m_borderDecoration = makeShared<CHyprBorderDecoration>(WINDOW);
+    const auto WINDOW    = m_window.m_self.lock();
+    m_shadowDecoration   = makeShared<CHyprDropShadowDecoration>(WINDOW);
+    m_borderDecoration   = makeShared<CHyprBorderDecoration>(WINDOW);
     m_glowDecoration     = makeShared<CHyprInnerGlowDecoration>(WINDOW);
     m_titleBarDecoration = makeShared<CHyprTitleBarDecoration>(WINDOW);
 
@@ -181,6 +181,10 @@ bool CWindowPresentation::checkInputOnDecorations(eInputType type, const Vector2
 
 bool CWindowPresentation::titleBarShown() const {
     return m_titleBarDecoration && m_titleBarDecoration->shown();
+}
+
+SP<CHyprTitleBarDecoration> CWindowPresentation::titleBarAt(const Vector2D& pos) const {
+    return m_titleBarDecoration && m_titleBarDecoration->acceptsInputAt(pos) ? m_titleBarDecoration : nullptr;
 }
 
 void CWindowPresentation::onDecorationModeChanged() {

@@ -141,8 +141,9 @@ class CInputManager {
     void               processMouseRequest(const CSeatManager::SSetCursorEvent& event);
 
     void               onTouchDown(ITouch::SDownEvent);
-    void               onTouchUp(ITouch::SUpEvent);
-    void               onTouchMove(ITouch::SMotionEvent);
+    void               onTouchUp(ITouch::SUpEvent, const SP<ITouch>& device);
+    void               onTouchMove(ITouch::SMotionEvent, const SP<ITouch>& device);
+    void               onTouchCancel(ITouch::SCancelEvent, const SP<ITouch>& device);
 
     void               onSwipeBegin(IPointer::SSwipeBeginEvent);
     void               onSwipeEnd(IPointer::SSwipeEndEvent);

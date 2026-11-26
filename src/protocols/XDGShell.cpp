@@ -1,5 +1,7 @@
 #include "XDGShell.hpp"
 #include "XDGDialog.hpp"
+#include "XDGDecoration.hpp"
+#include "ServerDecorationKDE.hpp"
 #include <algorithm>
 #include "../Compositor.hpp"
 #include "../managers/SeatManager.hpp"
@@ -573,21 +575,31 @@ CXDGSurfaceResource::CXDGSurfaceResource(SP<CXdgSurface> resource_, SP<CXDGWMBas
     });
 
     m_surfacePrecommit = m_surface->m_events.precommit.listen([this] {
-        // A null buffer is applied at once, without queueing.
+        if (const auto MODE = PROTO::xdgDecoration->modeFor(m_toplevel.lock()))
+            m_pending.serverDecorations = *MODE == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+        else if (const auto MODE = PROTO::serverDecorationKDE->modeFor(m_surface.lock()); m_toplevel && MODE)
+            m_pending.serverDecorations = *MODE == ORG_KDE_KWIN_SERVER_DECORATION_MANAGER_MODE_SERVER;
+        else
+            m_pending.serverDecorations = false;
+
+        if (m_pending.serverDecorations != m_current.serverDecorations || m_pending.serverDecorations != m_lastQueuedServerDecorations)
+            m_surface->m_pending.updated.bits.xdgshell = true;
+        m_lastQueuedServerDecorations = m_pending.serverDecorations;
+
         m_directCommit = !m_surface->m_pending.buffer && m_surface->m_pending.updated.bits.buffer;
     });
 
     m_surfaceStateCommit = m_surface->m_events.stateCommit.listen([this](WP<SSurfaceState> state) {
         m_directCommit = false;
-        m_queuedGeometry.push(state, m_pending.geometry);
+        m_queuedState.push(state, m_pending);
     });
 
     m_listeners.surfaceCommit = m_surface->m_events.commit.listen([this] {
-        m_current = m_pending;
-        if (m_directCommit)
-            m_queuedGeometry.clear();
-        else if (const auto GEOMETRY = m_queuedGeometry.take())
-            m_current.geometry = *GEOMETRY;
+        if (m_directCommit) {
+            m_current = m_pending;
+            m_queuedState.clear();
+        } else if (const auto STATE = m_queuedState.take())
+            m_current = *STATE;
         m_directCommit = false;
         if (m_toplevel)
             m_toplevel->m_current = m_toplevel->m_pending;
@@ -713,6 +725,7 @@ uint32_t CXDGSurfaceResource::scheduleConfigure() {
 
 void CXDGSurfaceResource::configure() {
     m_stateUpdate.reset();
+    PROTO::xdgDecoration->configure(m_toplevel.lock(), m_scheduledSerial);
     m_resource->sendConfigure(m_scheduledSerial);
 }
 

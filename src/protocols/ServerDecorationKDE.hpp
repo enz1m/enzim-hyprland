@@ -14,20 +14,16 @@ class CServerDecorationKDE {
 
     SP<CWLSurfaceResource> m_surf;
 
-    uint32_t               m_mostRecentlySent      = 0;
-    uint32_t               m_mostRecentlyRequested = 0;
+    uint32_t               m_mostRecentlySent = 0;
 
     bool                   good();
 
   private:
     uint32_t                        kdeDefaultModeCSD();
     uint32_t                        kdeModeOnRequestCSD(uint32_t modeRequestedByClient);
-    uint32_t                        kdeModeOnReleaseCSD();
     void                            sendMode(uint32_t mode);
 
     SP<COrgKdeKwinServerDecoration> m_resource;
-
-    uint32_t                        m_requestsSent = 0;
 };
 
 class CServerDecorationKDEProtocol : public IWaylandProtocol {

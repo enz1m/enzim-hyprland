@@ -39,6 +39,7 @@ namespace Desktop::View {
         void                                              uncacheDecorations();
         bool                                              checkInputOnDecorations(eInputType type, const Vector2D& coordinates, std::any data = {});
         bool                                              titleBarShown() const;
+        SP<CHyprTitleBarDecoration>                       titleBarAt(const Vector2D& pos) const;
         void                                              onDecorationModeChanged();
 
         Types::CMultiAVarContainer<float, uint8_t>&       alpha();

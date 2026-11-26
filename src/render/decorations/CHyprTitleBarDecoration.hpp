@@ -1,7 +1,9 @@
 #pragma once
 
 #include "IHyprWindowDecoration.hpp"
-#include "../../devices/IPointer.hpp"
+#include <map>
+
+class IHID;
 #include "../../helpers/signal/Signal.hpp"
 #include "../Texture.hpp"
 #include <optional>
@@ -29,8 +31,15 @@ class CHyprTitleBarDecoration : public IHyprWindowDecoration {
     CHyprTitleBarDecoration(PHLWINDOW);
     virtual ~CHyprTitleBarDecoration();
 
-    // Called for every pointer button press before decorations see it.
-    static void notePress();
+    using Contact = std::pair<const IHID*, int64_t>;
+
+    static bool                        beginContact(Contact contact, PHLWINDOW window, const Vector2D& pos, uint32_t time, bool primary = true, PHLMONITOR monitor = {});
+    static bool                        moveContact(Contact contact, const Vector2D& pos);
+    static bool                        moveTouchContact(Contact contact, const Vector2D& normalizedPos);
+    static bool                        endContact(Contact contact, std::optional<Vector2D> pos, uint32_t time, bool cancelled = false);
+    static void                        cancelContacts(const IHID* device);
+    static bool                        ownsContact(Contact contact);
+    static bool                        dragging();
 
     virtual SDecorationPositioningInfo getPositioningInfo();
     virtual void                       onPositioningReply(const SDecorationPositioningReply& reply);
@@ -38,7 +47,6 @@ class CHyprTitleBarDecoration : public IHyprWindowDecoration {
     virtual eDecorationType            getDecorationType();
     virtual void                       updateWindow(PHLWINDOW);
     virtual void                       damageEntire();
-    virtual bool                       onInputOnDeco(const eInputType, const Vector2D&, std::any = {});
     virtual eDecorationLayer           getDecorationLayer();
     virtual uint64_t                   getDecorationFlags();
     virtual std::string                getDisplayName();
@@ -46,6 +54,7 @@ class CHyprTitleBarDecoration : public IHyprWindowDecoration {
     virtual void                       onWindowMap();
 
     bool                               shown() const;
+    bool                               acceptsInputAt(const Vector2D& pos) const;
     // Re-evaluates whether the bar is shown and lays the window out again when that changed.
     void refresh();
 
@@ -67,31 +76,41 @@ class CHyprTitleBarDecoration : public IHyprWindowDecoration {
         SP<Render::ITexture> texture;
     };
 
-    bool                  wanted() const;
-    CBox                  barBoxGlobal() const;
-    SLayout               layout(double width) const;
-    std::optional<size_t> controlAt(const Vector2D& global) const;
-    static bool           offers(PHLWINDOW window, eControl control);
-    bool                  onButton(const Vector2D& global, const IPointer::SButtonEvent& e);
-    void                  onPointerMove(const Vector2D& global);
-    void                  activate(eControl control);
-    void                  drawCluster(PHLMONITOR monitor, const SLayout& layout, const CBox& cluster, const CBox& barPx, float a, STextureCache& cache);
-    void                  drawTitle(PHLMONITOR monitor, const SLayout& layout, const CBox& barPx, float a);
+    bool                    wanted() const;
+    CBox                    barBoxGlobal() const;
+    SLayout                 layout(double width) const;
+    std::optional<eControl> controlAt(const Vector2D& global) const;
+    static bool             offers(PHLWINDOW window, eControl control);
+    void                    onPointerMove(const Vector2D& global);
+    void                    activate(eControl control);
+    void                    drawCluster(PHLMONITOR monitor, const SLayout& layout, const CBox& cluster, const CBox& barPx, float a, STextureCache& cache);
+    void                    drawTitle(PHLMONITOR monitor, const SLayout& layout, const CBox& barPx, float a);
 
-    CBox                  m_assignedBox;
-    bool                  m_shown = false;
-    std::optional<size_t> m_hovered;
-    std::optional<size_t> m_pressed;
-    // The bar that took the last button press, so it alone takes the release.
-    // Compared, never dereferenced.
-    static inline const CHyprTitleBarDecoration* s_pressOwner = nullptr;
-    uint32_t              m_lastPressMs = 0;
-    Vector2D              m_lastPressPos;
-    bool                  m_lastPressValid = false;
-    STextureCache         m_titleCache;
-    STextureCache         m_leadingCache;
-    STextureCache         m_trailingCache;
-    CHyprSignalListener   m_mouseMove;
-    CHyprSignalListener   m_propsRefreshed;
-    CHyprSignalListener   m_titleChanged;
+    CBox                    m_assignedBox;
+    bool                    m_shown = false;
+    std::optional<eControl> m_hovered;
+    struct SContact {
+        WP<CHyprTitleBarDecoration> owner;
+        PHLMONITORREF               monitor;
+        Vector2D                    start, pos;
+        std::optional<eControl>     control;
+        bool                        primary = false;
+        bool                        moved   = false;
+    };
+    struct STap {
+        const IHID* device = nullptr;
+        uint32_t    time   = 0;
+        Vector2D    pos;
+    };
+    static std::map<Contact, SContact> s_contacts;
+    static std::optional<Contact>      s_dragContact;
+    static CHyprSignalListener         s_dragEnded;
+    std::optional<STap>                m_lastTap;
+    struct SScaleCache {
+        STextureCache title, leading, trailing;
+    };
+    std::map<float, SScaleCache> m_caches;
+    CHyprSignalListener          m_mouseMove;
+    CHyprSignalListener          m_propsRefreshed;
+    CHyprSignalListener          m_titleChanged;
 };

@@ -30,6 +30,8 @@
 #include <src/state/workspace/State.hpp>
 #include <src/layout/LayoutManager.hpp>
 #include <src/event/EventBus.hpp>
+#include <src/layout/supplementary/DragController.hpp>
+#include <src/managers/fullscreen/FullscreenController.hpp>
 #undef private
 
 #include <hyprutils/utils/ScopeGuard.hpp>
@@ -272,6 +274,132 @@ class CTestMouse : public IPointer {
   private:
     bool m_isVirtual = false;
 };
+
+class CTestTouch : public ITouch {
+  public:
+    bool isVirtual() const override {
+        return true;
+    }
+
+    SP<Aquamarine::ITouch> aq() override {
+        return nullptr;
+    }
+};
+
+static SDispatchResult testTitleBarTouch() {
+    const auto WINDOW = Desktop::focusState()->window();
+    if (!WINDOW || !WINDOW->isFloating() || !WINDOW->presentation().titleBarShown())
+        return {.success = false, .error = "Expected a floating window with a title bar"};
+
+    const auto TOUCH = makeShared<CTestTouch>();
+    const auto MONITOR = WINDOW->m_monitor.lock();
+    TOUCH->m_boundOutput = MONITOR->m_name;
+    const auto NORMALIZE = [&](const Vector2D& point) { return (point - MONITOR->m_position) / MONITOR->m_size; };
+    const auto POS = WINDOW->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const auto BAR = POS + Vector2D{WINDOW->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT).x / 2, -22.0};
+    const auto END = BAR + Vector2D{80, 50};
+    const int  LOCKS = g_pSeatManager->m_touchLocks;
+    const auto& DRAG = g_layoutManager->dragController();
+
+    g_pInputManager->onTouchDown({.timeMs = 10, .touchID = 1, .pos = NORMALIZE(BAR), .device = TOUCH});
+    g_pInputManager->onTouchMove({.timeMs = 20, .touchID = 1, .pos = NORMALIZE(BAR + Vector2D{2, 0})}, TOUCH);
+    const bool SMALL_MOTION_WAS_DRAG = !!DRAG->target();
+    g_pInputManager->onTouchMove({.timeMs = 30, .touchID = 1, .pos = NORMALIZE(END)}, TOUCH);
+    const bool MOVING = DRAG->target() == WINDOW->layoutTarget();
+    g_pInputManager->onTouchUp({.timeMs = 40, .touchID = 1}, TOUCH);
+    const auto MOVED = WINDOW->position(Desktop::View::IGeometric::GEOMETRIC_GOAL);
+
+    if (g_pSeatManager->m_touchLocks != LOCKS) {
+        g_pSeatManager->sendTouchCancel();
+        return {.success = false, .error = "The seat received a title bar touch"};
+    }
+    if (SMALL_MOTION_WAS_DRAG || !MOVING || DRAG->target() || (MOVED - POS).distance(END - BAR) > 2)
+        return {.success = false,
+                .error = std::format("Touch drag state before crossing={}, after crossing={}, after release={}, movement {}, expected {}",
+                                     SMALL_MOTION_WAS_DRAG, MOVING, !!DRAG->target(), MOVED - POS, END - BAR)};
+
+    const auto CONTENT = MOVED + Vector2D{50, 50};
+    const auto MOVED_BAR = BAR + (MOVED - POS);
+    g_pInputManager->onTouchDown({.timeMs = 50, .touchID = 2, .pos = NORMALIZE(CONTENT), .device = TOUCH});
+    const bool CLIENT_DOWN = g_pSeatManager->m_state.touchFocus == WINDOW->wlSurface()->resource() && g_pSeatManager->m_touchLocks == LOCKS + 1;
+    g_pInputManager->onTouchMove({.timeMs = 60, .touchID = 2, .pos = NORMALIZE(MOVED_BAR)}, TOUCH);
+    g_pInputManager->onTouchUp({.timeMs = 70, .touchID = 2}, TOUCH);
+    const bool CLIENT_UP = g_pSeatManager->m_touchLocks == LOCKS;
+    if (!CLIENT_UP)
+        g_pSeatManager->sendTouchCancel();
+    if (!CLIENT_DOWN || !CLIENT_UP || DRAG->target())
+        return {.success = false, .error = "Client touch lost its ownership at the title bar"};
+
+    const auto TAP = [&](const Vector2D& pos, uint32_t time) {
+        g_pInputManager->onTouchDown({.timeMs = time, .touchID = 1, .pos = NORMALIZE(pos), .device = TOUCH});
+        g_pInputManager->onTouchUp({.timeMs = time + 20, .touchID = 1}, TOUCH);
+    };
+    TAP(MOVED_BAR, 1000);
+    TAP(MOVED_BAR, 1100);
+    if (!Fullscreen::controller()->isFullscreen(WINDOW, Fullscreen::FSMODE_MAXIMIZED))
+        return {.success = false, .error = "Two title bar taps did not maximize the window"};
+
+    const auto MAXIMIZED_BAR = WINDOW->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) +
+        Vector2D{WINDOW->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT).x / 2, -22.0};
+    TAP(MAXIMIZED_BAR, 2000);
+    TAP(MAXIMIZED_BAR, 2100);
+    if (Fullscreen::controller()->isFullscreen(WINDOW) || WINDOW->position(Desktop::View::IGeometric::GEOMETRIC_GOAL).distance(MOVED) > 2)
+        return {.success = false, .error = "Two title bar taps did not restore the floating position"};
+
+    return {};
+}
+
+class CTestTablet : public Aquamarine::ITablet {
+  public:
+    const std::string& getName() override {
+        static const std::string NAME = "test-tablet";
+        return NAME;
+    }
+};
+
+class CTestPen : public Aquamarine::ITabletTool {
+  public:
+    const std::string& getName() override {
+        static const std::string NAME = "test-pen";
+        return NAME;
+    }
+};
+
+static SDispatchResult testTitleBarPen() {
+    const auto WINDOW = Desktop::focusState()->window();
+    if (!WINDOW || !WINDOW->presentation().titleBarShown())
+        return {.success = false, .error = "Expected a window with a title bar"};
+
+    const auto MONITOR = WINDOW->m_monitor.lock();
+    const auto POS = WINDOW->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const auto BAR = POS + Vector2D{WINDOW->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT).x / 2, -22.0};
+    const auto CONTENT = POS + Vector2D{50, 50};
+    const auto NORMALIZE = [&](const Vector2D& point) { return (point - MONITOR->m_position) / MONITOR->m_size; };
+
+    const auto DEVICE = makeShared<CTestTablet>();
+    const auto TABLET = CTablet::create(DEVICE);
+    TABLET->m_boundOutput = MONITOR->m_name;
+    const auto PEN = makeShared<CTestPen>();
+    PEN->type = Aquamarine::ITabletTool::AQ_TABLET_TOOL_TYPE_PEN;
+    const auto TOOL = g_pInputManager->ensureTabletToolPresent(PEN);
+
+    g_pInputManager->onTabletProximity({.tool = PEN, .tablet = TABLET, .timeMs = 10, .proximity = NORMALIZE(BAR), .in = true});
+    g_pInputManager->onTabletTip({.tool = PEN, .tablet = TABLET, .timeMs = 20, .tip = NORMALIZE(BAR), .in = true});
+    const bool BAR_DELIVERED = TOOL->m_isDown || TOOL->getSurface();
+    g_pInputManager->onTabletTip({.tool = PEN, .tablet = TABLET, .timeMs = 30, .tip = NORMALIZE(CONTENT), .in = false});
+
+    g_pInputManager->onTabletTip({.tool = PEN, .tablet = TABLET, .timeMs = 40, .tip = NORMALIZE(CONTENT), .in = true});
+    const bool CLIENT_DOWN = TOOL->m_isDown && TOOL->getSurface() == WINDOW->wlSurface()->resource();
+    g_pInputManager->onTabletTip({.tool = PEN, .tablet = TABLET, .timeMs = 50, .tip = NORMALIZE(BAR), .in = false});
+    const bool CLIENT_UP = !TOOL->m_isDown && TOOL->getSurface() == WINDOW->wlSurface()->resource();
+    g_pInputManager->onTabletProximity({.tool = PEN, .tablet = TABLET, .timeMs = 60, .proximity = NORMALIZE(BAR), .in = false});
+    DEVICE->events.destroy.emit();
+    PEN->events.destroy.emit();
+
+    if (BAR_DELIVERED || !CLIENT_DOWN || !CLIENT_UP)
+        return {.success = false, .error = "Pen tip was delivered to the wrong owner"};
+    return {};
+}
 
 class CKeyboardEventRecorder : public IKeyboardEventHandler {
   public:
@@ -1095,6 +1223,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     addLuaFn("expect_window_at_workspace", ::luaExpectWindowAtWorkspace);
     addLuaFn("expect_workspace_rename_event", ::luaExpectWorkspaceRenameEvent);
     addLuaFn("test_drag_lifecycle", ::luaTestDragLifecycle);
+    addLuaFn("test_title_bar_touch", [](lua_State* L) { return luaResult(L, ::testTitleBarTouch()); });
+    addLuaFn("test_title_bar_pen", [](lua_State* L) { return luaResult(L, ::testTitleBarPen()); });
     addLuaFn("test_pinch_delta_scale", ::luaTestPinchDeltaScale);
     addLuaFn("vkb", ::luaVkb);
     addLuaFn("alt", ::luaAlt);

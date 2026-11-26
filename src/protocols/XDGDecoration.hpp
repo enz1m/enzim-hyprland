@@ -1,6 +1,8 @@
 #pragma once
 
 #include <optional>
+#include <deque>
+#include "../helpers/signal/Signal.hpp"
 #include <vector>
 #include <unordered_map>
 #include "WaylandProtocol.hpp"
@@ -12,21 +14,21 @@ class CXDGDecoration {
   public:
     CXDGDecoration(SP<CZxdgToplevelDecorationV1> resource_, wl_resource* toplevel);
 
-    uint32_t     mostRecentlySent      = 0;
-    uint32_t     mostRecentlyRequested = 0;
-
     bool         good();
     wl_resource* toplevelResource();
 
   private:
-    zxdgToplevelDecorationV1Mode  xdgDefaultModeCSD();
-    zxdgToplevelDecorationV1Mode  xdgModeOnRequestCSD(uint32_t modeRequestedByClient);
-    zxdgToplevelDecorationV1Mode  xdgModeOnReleaseCSD();
-    void                          sendMode(zxdgToplevelDecorationV1Mode mode);
+    void                                                          sendMode(zxdgToplevelDecorationV1Mode mode);
 
-    SP<CZxdgToplevelDecorationV1> m_resource;
-    wl_resource*                  m_toplevelResource = nullptr; // READ-ONLY.
-    WP<CXDGToplevelResource>      m_toplevel;
+    SP<CZxdgToplevelDecorationV1>                                 m_resource;
+    wl_resource*                                                  m_toplevelResource = nullptr; // READ-ONLY.
+    WP<CXDGToplevelResource>                                      m_toplevel;
+
+    zxdgToplevelDecorationV1Mode                                  m_pendingMode = ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
+    std::optional<zxdgToplevelDecorationV1Mode>                   m_sentMode;
+    std::deque<std::pair<uint32_t, zxdgToplevelDecorationV1Mode>> m_configures;
+    std::optional<zxdgToplevelDecorationV1Mode>                   m_ackedMode;
+    CHyprSignalListener                                           m_ack;
 
     friend class CXDGDecorationProtocol;
 };
@@ -37,7 +39,9 @@ class CXDGDecorationProtocol : public IWaylandProtocol {
 
     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
 
-    // The mode last configured for the toplevel, or none when it has no decoration object.
+    void         configure(SP<CXDGToplevelResource> toplevel, uint32_t serial);
+
+    // The acknowledged mode, or none when the toplevel has no decoration object.
     std::optional<zxdgToplevelDecorationV1Mode> modeFor(SP<CXDGToplevelResource> toplevel) const;
 
   private:
