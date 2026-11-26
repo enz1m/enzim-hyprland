@@ -575,6 +575,7 @@ void CWindow::onMap() {
 
         m_presentation->updateDecorations();
 
+        updateBorderlessFullscreen();
         m_events.resize.emit();
     });
 
@@ -584,6 +585,7 @@ void CWindow::onMap() {
 
         m_presentation->updateDecorations();
 
+        updateBorderlessFullscreen();
         if (m_monitor != m_prevMonitor) {
             m_prevMonitor = m_monitor;
             m_events.monitorChanged.emit();
@@ -599,6 +601,29 @@ void CWindow::onMap() {
 
     setSubsurfaceHead(CSubsurface::create(m_self.lock()));
     setPopupHead(CPopup::create(m_self.lock()));
+}
+
+bool CWindow::borderlessFullscreen() const {
+    const auto MONITOR = m_monitor.lock();
+    if (!m_isMapped || isHidden() || !MONITOR || !isFloating() || (m_state & WINDOW_STATE_PINNED) || m_backend->traits().overrideRedirect ||
+        geometricBox(GEOMETRIC_GOAL) != MONITOR->logicalBox())
+        return false;
+
+    const auto MODES = Fullscreen::controller()->getFullscreenModes(m_self.lock());
+    return MODES.internal == Fullscreen::FSMODE_NONE && MODES.client == Fullscreen::FSMODE_NONE &&
+        (!m_ruleApplicator->decorate().valueOrDefault() || !m_backend->wantsServerDecorations());
+}
+
+void CWindow::updateBorderlessFullscreen() {
+    const bool COVERING = borderlessFullscreen();
+    if (m_borderlessFullscreen == COVERING)
+        return;
+    m_borderlessFullscreen = COVERING;
+
+    g_pEventLoopManager->doLater([self = m_self] {
+        if (const auto window = self.lock(); window && window->mapped())
+            Event::bus()->m_events.window.borderlessFullscreen.emit(window);
+    });
 }
 
 void CWindow::setHidden(bool hidden) {
@@ -1169,10 +1194,11 @@ void CWindow::mapWindow() {
         LOG(Log::ERR, "mapWindow: no valid monitor/workspace, aborting map for {:x}", (uintptr_t)this);
         return;
     }
-    auto PWORKSPACE = PMONITOR->m_activeSpecialWorkspace ? PMONITOR->m_activeSpecialWorkspace : PMONITOR->m_activeWorkspace;
-    m_monitor       = PMONITOR;
-    m_workspace     = PWORKSPACE;
-    m_isMapped      = true;
+    auto PWORKSPACE        = PMONITOR->m_activeSpecialWorkspace ? PMONITOR->m_activeSpecialWorkspace : PMONITOR->m_activeWorkspace;
+    m_monitor              = PMONITOR;
+    m_workspace            = PWORKSPACE;
+    m_isMapped             = true;
+    m_borderlessFullscreen = false;
     m_presentation->setAnimatingIn(true);
     const auto METADATA = m_backend->metadata();
     const auto TRAITS   = m_backend->traits();

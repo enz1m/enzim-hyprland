@@ -107,6 +107,8 @@ CLuaEventHandler::CLuaEventHandler(lua_State* L) : m_lua(L) {
     m_listeners.push_back(bus()->m_events.window.class_.listen([this](PHLWINDOW w) { dispatch("window.class", 1, [&](lua_State* L) { CLuaWindow::push(L, w); }); }));
     m_listeners.push_back(bus()->m_events.window.pin.listen([this](PHLWINDOW w) { dispatch("window.pin", 1, [&](lua_State* L) { CLuaWindow::push(L, w); }); }));
     m_listeners.push_back(bus()->m_events.window.fullscreen.listen([this](PHLWINDOW w) { dispatch("window.fullscreen", 1, [&](lua_State* L) { CLuaWindow::push(L, w); }); }));
+    m_listeners.push_back(
+        bus()->m_events.window.borderlessFullscreen.listen([this](PHLWINDOW w) { dispatch("window.borderless_fullscreen", 1, [&](lua_State* L) { CLuaWindow::push(L, w); }); }));
     m_listeners.push_back(bus()->m_events.window.updateRules.listen([this](PHLWINDOW w) { dispatch("window.update_rules", 1, [&](lua_State* L) { CLuaWindow::push(L, w); }); }));
     m_listeners.push_back(bus()->m_events.window.moveToWorkspace.listen([this](PHLWINDOW w, PHLWORKSPACE ws) {
         dispatch("window.move_to_workspace", 2, [&](lua_State* L) {
@@ -288,6 +290,7 @@ std::unordered_set<std::string> CLuaEventHandler::knownEvents() {
         "window.class",
         "window.pin",
         "window.fullscreen",
+        "window.borderless_fullscreen",
         "window.update_rules",
         "window.move_to_workspace",
         "window.bell",

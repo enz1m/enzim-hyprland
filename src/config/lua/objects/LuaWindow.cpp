@@ -124,6 +124,8 @@ static int windowIndex(lua_State* L) {
         lua_pushboolean(L, w->fullscreenPolicy().pinFullscreened());
     else if (key == "fullscreen")
         lua_pushinteger(L, sc<lua_Integer>(sc<uint8_t>(Fullscreen::controller()->getFullscreenModes(w).internal)));
+    else if (key == "borderless_fullscreen")
+        lua_pushboolean(L, w->borderlessFullscreen());
     else if (key == "fullscreen_client")
         lua_pushinteger(L, sc<lua_Integer>(sc<uint8_t>(Fullscreen::controller()->getFullscreenModes(w).client)));
     else if (key == "allowed_over_fullscreen")

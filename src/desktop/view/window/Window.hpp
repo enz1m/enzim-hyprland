@@ -203,6 +203,7 @@ namespace Desktop::View {
         void                       onMap();
         void                       setHidden(bool hidden);
         bool                       isHidden() const;
+        bool                       borderlessFullscreen() const;
         bool                       shouldBlur() const;
         bool                       isAllowedOverFullscreen() const;
         bool                       isBlockedByFullscreen() const;
@@ -265,6 +266,7 @@ namespace Desktop::View {
         void         initialize();
         void         attachBackendListeners();
         void         mapWindow();
+        void         updateBorderlessFullscreen();
         void         unmapWindow();
         void         commitWindow(bool initialCommit);
         void         destroyWindow();
@@ -279,9 +281,10 @@ namespace Desktop::View {
         void         unmanagedSetGeometry(const CBox& box);
         virtual void onInputBlockStateUpdated(bool blocked) override;
         // For hidden windows and stuff
-        bool        m_hidden    = false;
-        bool        m_suspended = false;
-        bool        m_isMapped  = false;
+        bool        m_hidden               = false;
+        bool        m_borderlessFullscreen = false;
+        bool        m_suspended            = false;
+        bool        m_isMapped             = false;
         std::string m_lastWorkspaceAddress;
         bool        m_lastWorkspaceSpecial = false;
 

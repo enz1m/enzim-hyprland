@@ -87,6 +87,7 @@ namespace Event {
                 Event<PHLWINDOW>                        class_;
                 Event<PHLWINDOW>                        pin;
                 Event<PHLWINDOW>                        fullscreen;
+                Event<PHLWINDOW>                        borderlessFullscreen;
                 Event<PHLWINDOW, bool>                  minimize;
                 Event<PHLWINDOW>                        floating;
                 Event<PHLWINDOW>                        updateRules;
