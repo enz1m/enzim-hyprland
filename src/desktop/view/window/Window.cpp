@@ -55,6 +55,7 @@
 #include "../../../protocols/ContentType.hpp"
 #include "../../../protocols/LayerShell.hpp"
 #include "../../../helpers/Color.hpp"
+#include "../../../helpers/MiscFunctions.hpp"
 #include "../../../helpers/math/Expression.hpp"
 #include "../../../render/Renderer.hpp"
 #include "../../../ipc/s2/S2.hpp"
@@ -639,7 +640,7 @@ void CWindow::setHidden(bool hidden) {
 }
 
 bool CWindow::isHidden() const {
-    return m_hidden || m_fullscreenDialogDeferred;
+    return m_hidden || m_fullscreenDialogOwner;
 }
 
 bool CWindow::shouldBlur() const {
@@ -848,8 +849,43 @@ static PHLWINDOW fullscreenFocusOwner() {
     return Fullscreen::controller()->isFullscreen(WINDOW, Fullscreen::FSMODE_FULLSCREEN) || WINDOW->borderlessFullscreen() ? WINDOW : nullptr;
 }
 
+std::optional<std::string> CWindow::deferredFullscreenDialog() const {
+    if (!m_fullscreenDialogOwner)
+        return std::nullopt;
+
+    // Keep the JSON within socket2's 1024-byte payload limit even after escaping.
+    const auto bounded = [](const std::string& value) {
+        size_t end = std::min<size_t>(value.size(), 64);
+        while (end < value.size() && end > 0 && (static_cast<unsigned char>(value[end]) & 0xc0) == 0x80)
+            --end;
+        return escapeJSONStrings(value.substr(0, end));
+    };
+    return std::format(R"({{"address":"{:x}","owner":"{:x}","id":"{:x}","class":"{}","title":"{}"}})", rc<uintptr_t>(this), m_fullscreenDialogOwner, m_metadata->stableID(),
+                       bounded(m_metadata->appID()), bounded(m_metadata->title()));
+}
+
+void CWindow::endFullscreenDialogDeferral(const char* event) {
+    if (auto dialog = deferredFullscreenDialog())
+        IPC::Socket2::sock()->postEvent({event, std::move(*dialog)});
+    m_fullscreenDialogOwner = 0;
+}
+
+bool CWindow::revealDeferredFullscreenDialog() {
+    if (!mapped() || !m_fullscreenDialogOwner || !m_workspace || m_hidden || g_pSessionLockManager->isSessionLocked() || !g_pInputManager->m_exclusiveKeyboardLSes.empty() ||
+        m_ruleApplicator->noFocus().valueOrDefault() || (g_pSeatManager->m_seatGrab && !g_pSeatManager->m_seatGrab->accepts(wlSurface()->resource())))
+        return false;
+
+    m_fullscreenFocusTimer.reset();
+    showDeferredFullscreenDialog();
+    Desktop::windowState()->raise(m_self.lock());
+    Desktop::focusState()->fullWindowFocus(m_self.lock(), FOCUS_REASON_DISPATCH_FOCUSWINDOW);
+    if (Desktop::focusState()->window() == m_self)
+        warpCursor();
+    return true;
+}
+
 void CWindow::showDeferredFullscreenDialog() {
-    m_fullscreenDialogDeferred = false;
+    endFullscreenDialogDeferral("fullscreen_dialog_released");
     if (!isHidden()) {
         updateSurfaceScaleTransformDetails(true);
         g_pHyprRenderer->damageWindow(m_self.lock());
@@ -877,7 +913,7 @@ void CWindow::scheduleFullscreenFocus() {
             }
 
             window->m_fullscreenFocusTimer.reset();
-            if (window->m_fullscreenDialogDeferred) {
+            if (window->m_fullscreenDialogOwner) {
                 window->showDeferredFullscreenDialog();
                 if (window->m_workspace && window->m_workspace->visible() && !window->isHidden() && !(window->m_state & WINDOW_STATE_NO_INITIAL_FOCUS))
                     Desktop::focusState()->fullWindowFocus(window, FOCUS_REASON_NEW_WINDOW);
@@ -933,7 +969,7 @@ void CWindow::activateWithPolicy(bool force, bool userInput) {
 
     if (userInput) {
         m_fullscreenFocusTimer.reset();
-        if (m_fullscreenDialogDeferred)
+        if (m_fullscreenDialogOwner)
             showDeferredFullscreenDialog();
     }
     if (isHidden())
@@ -1604,9 +1640,12 @@ void CWindow::mapWindow() {
         ACTIVATION_SOURCE && ACTIVATION_SOURCE == PFOCUSEDWINDOWPREV && Time::steadyNow() <= m_pendingUserActivationUntil && !g_pSessionLockManager->isSessionLocked();
     const bool BROKER_DIALOG     = (m_state & WINDOW_STATE_PINNED) && m_ruleApplicator->stayFocused().valueOrDefault();
     const bool BACKGROUND_DIALOG = (TRAITS.modal || TRAITS.transient) && m_backend->parent() != PFOCUSEDWINDOWPREV;
-    if (m_target->floating() && (BROKER_DIALOG || BACKGROUND_DIALOG) && !TRUSTED_OPEN && fullscreenFocusOwner()) {
-        m_fullscreenDialogDeferred = true;
-        scheduleFullscreenFocus();
+    if (m_target->floating() && (BROKER_DIALOG || BACKGROUND_DIALOG) && !TRUSTED_OPEN) {
+        if (const auto OWNER = fullscreenFocusOwner()) {
+            m_fullscreenDialogOwner = rc<uintptr_t>(OWNER.get());
+            IPC::Socket2::sock()->postEvent({"fullscreen_dialog_deferred", *deferredFullscreenDialog()});
+            scheduleFullscreenFocus();
+        }
     }
 
     // check LS focus grab
@@ -1628,7 +1667,7 @@ void CWindow::mapWindow() {
             Fullscreen::controller()->setFullscreenMode(Fullscreen::controller()->getFullscreenWindow(m_workspace), Fullscreen::FSMODE_NONE, std::nullopt);
     }
 
-    if (!m_fullscreenDialogDeferred && !m_ruleApplicator->noFocus().valueOrDefault() && !(m_state & WINDOW_STATE_NO_INITIAL_FOCUS) &&
+    if (!m_fullscreenDialogOwner && !m_ruleApplicator->noFocus().valueOrDefault() && !(m_state & WINDOW_STATE_NO_INITIAL_FOCUS) &&
         (!TRAITS.overrideRedirect || TRAITS.wantsFocus) && !workspaceSilent && !monitorSilent && (!PFORCEFOCUS || PFORCEFOCUS == m_self.lock()) &&
         !g_pInputManager->isConstrained()) {
 
@@ -1649,7 +1688,7 @@ void CWindow::mapWindow() {
     if (requestedClientFSMode == Fullscreen::FSMODE_MAXIMIZED && m_fullscreenPolicy->requestSuppression().maximize)
         requestedClientFSMode.reset();
 
-    if (!m_fullscreenDialogDeferred && !(m_state & WINDOW_STATE_NO_INITIAL_FOCUS) &&
+    if (!m_fullscreenDialogOwner && !(m_state & WINDOW_STATE_NO_INITIAL_FOCUS) &&
         (requestedInternalFSMode.has_value() || requestedClientFSMode.has_value() || requestedFSState.has_value())) {
         // fix fullscreen on requested (basically do a switcheroo)
         std::optional<bool> wasFullscreenLayoutHandled = std::nullopt;
@@ -1764,7 +1803,7 @@ void CWindow::unmapWindow() {
     }
 
     // Allow the renderer to catch the last frame.
-    const auto SNAPSHOT = !m_fullscreenDialogDeferred && g_pHyprRenderer->shouldRenderWindow(m_self.lock()) && !m_ruleApplicator->noAnim().valueOrDefault() ?
+    const auto SNAPSHOT = !m_fullscreenDialogOwner && g_pHyprRenderer->shouldRenderWindow(m_self.lock()) && !m_ruleApplicator->noAnim().valueOrDefault() ?
         g_pHyprRenderer->makeSnapshotFB(m_self.lock()) :
         nullptr;
 
@@ -1806,8 +1845,8 @@ void CWindow::unmapWindow() {
     g_pHyprRenderer->damageWindow(m_self.lock());
 
     // do this after onWindowRemoved because otherwise it'll think the window is invalid
-    m_isMapped                 = false;
-    m_fullscreenDialogDeferred = false;
+    m_isMapped = false;
+    endFullscreenDialogDeferral("fullscreen_dialog_closed");
 
     // refocus on a new window if needed
     if (wasLastWindow) {

@@ -1976,6 +1976,15 @@ void IPC::Socket1::registerBuiltinCommands(CSocket1& socket) {
     socket.registerCommand(legacyCommand("workspacerules", COMMAND_MATCH_EXACT, workspaceRulesRequest));
     socket.registerCommand(legacyCommand("activeworkspace", COMMAND_MATCH_EXACT, activeWorkspaceRequest));
     socket.registerCommand(SCommand{.name = "clients", .match = COMMAND_MATCH_EXACT, .handler = [](const SRequest& request) { return clientsRequest(request); }});
+    socket.registerCommand(SCommand{.name = "deferreddialogs", .match = COMMAND_MATCH_EXACT, .handler = [](const SRequest&) {
+                                        std::string result = "[";
+                                        for (const auto& window : Desktop::windowState()->windows()) {
+                                            if (auto dialog = window->deferredFullscreenDialog())
+                                                result += *dialog + ",";
+                                        }
+                                        trimTrailingComma(result);
+                                        return result + "]";
+                                    }});
     socket.registerCommand(legacyCommand("kill", COMMAND_MATCH_EXACT, killRequest));
     socket.registerCommand(legacyCommand("activewindow", COMMAND_MATCH_EXACT, activeWindowRequest));
     socket.registerCommand(legacyCommand("layers", COMMAND_MATCH_EXACT, layersRequest));

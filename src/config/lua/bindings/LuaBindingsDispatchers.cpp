@@ -652,6 +652,19 @@ static int dsp_mouseResize(lua_State* L) {
     return requestBindRelease(L, Internal::checkResult(L, CA::mouse(std::format("resizewindow {}", *keepAspectRatio))));
 }
 
+static int dsp_revealDeferredDialog(lua_State* L) {
+    const auto WINDOW = Internal::windowFromUpval(L, 1).value_or(nullptr);
+    if (!WINDOW || !WINDOW->revealDeferredFullscreenDialog())
+        return Internal::dispatcherError(L, "Deferred dialog is unavailable", WARN, C_NOTFOUND);
+    return Internal::checkResult(L, {});
+}
+
+static int hlRevealDeferredDialog(lua_State* L) {
+    Internal::pushWindowUpval(L, 1);
+    lua_pushcclosure(L, dsp_revealDeferredDialog, 1);
+    return 1;
+}
+
 static int hlWindowClose(lua_State* L) {
     Internal::pushWindowUpval(L, 1);
     lua_pushcclosure(L, dsp_closeWindow, 1);
@@ -1321,6 +1334,7 @@ void Internal::registerDispatcherBindings(lua_State* L) {
         lua_newtable(L);
         Internal::markDispatcherTable(L);
         Internal::setFn(L, "close", hlWindowClose);
+        Internal::setFn(L, "reveal_deferred_dialog", hlRevealDeferredDialog);
         Internal::setFn(L, "kill", hlWindowKill);
         Internal::setFn(L, "signal", hlWindowSignal);
         Internal::setFn(L, "float", hlWindowFloat);

@@ -206,6 +206,8 @@ namespace Desktop::View {
         void                       setHidden(bool hidden);
         bool                       isHidden() const;
         bool                       borderlessFullscreen() const;
+        std::optional<std::string> deferredFullscreenDialog() const;
+        bool                       revealDeferredFullscreenDialog();
         bool                       shouldBlur() const;
         bool                       isAllowedOverFullscreen() const;
         bool                       isBlockedByFullscreen() const;
@@ -271,6 +273,7 @@ namespace Desktop::View {
         void         updateBorderlessFullscreen();
         void         scheduleFullscreenFocus();
         void         showDeferredFullscreenDialog();
+        void         endFullscreenDialogDeferral(const char* event);
         void         unmapWindow();
         void         commitWindow(bool initialCommit);
         void         destroyWindow();
@@ -289,7 +292,7 @@ namespace Desktop::View {
         bool                m_borderlessFullscreen     = false;
         bool                m_suspended                = false;
         bool                m_isMapped                 = false;
-        bool                m_fullscreenDialogDeferred = false;
+        uintptr_t           m_fullscreenDialogOwner    = 0;
         SP<CEventLoopTimer> m_fullscreenFocusTimer;
         PHLWINDOWREF        m_pendingUserActivationSource;
         Time::steady_tp     m_pendingUserActivationUntil;

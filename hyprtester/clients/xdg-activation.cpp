@@ -31,7 +31,7 @@ static void require(bool condition, const char* failure) {
 
 class CActivationClient {
   public:
-    explicit CActivationClient(const char* appID);
+    explicit CActivationClient(const char* appID, const std::string& token = {});
     ~CActivationClient();
 
     void        press();
@@ -57,7 +57,7 @@ class CActivationClient {
     CSharedPointer<CCXdgActivationV1> m_activation;
 };
 
-CActivationClient::CActivationClient(const char* appID) {
+CActivationClient::CActivationClient(const char* appID, const std::string& token) {
     m_display = wl_display_connect(nullptr);
     require(m_display, "could not connect");
     const wl_registry_listener registryListener = {
@@ -101,6 +101,8 @@ CActivationClient::CActivationClient(const char* appID) {
         wl_surface_attach(m_surface, buffer, 0, 0);
         wl_surface_commit(m_surface);
     });
+    if (!token.empty())
+        redeem(token);
     wl_surface_commit(m_surface);
     roundtrip();
     roundtrip();
@@ -212,6 +214,41 @@ int main(int argc, char** argv) try {
     for (int attempt = 0; attempt < 50 && !focused("activation-target"); ++attempt)
         std::this_thread::sleep_for(20ms);
     require(focused("activation-target"), "fullscreen exit lost deferred activation");
+
+    const auto FULLSCREEN_SOURCE = [] {
+        require(getFromSocket("/dispatch hl.dsp.focus({window = 'class:activation-source'})") == "ok", "could not refocus source");
+        require(getFromSocket("/dispatch hl.dsp.window.fullscreen({mode = 'fullscreen', action = 'set'})") == "ok", "could not make source fullscreen");
+    };
+    require(getFromSocket("/eval hl.window_rule({match = {class = 'activation-prompt'}, float = true, pin = true, stay_focused = true})") == "ok",
+            "could not configure broker prompt");
+
+    FULLSCREEN_SOURCE();
+    {
+        CActivationClient prompt("activation-prompt");
+        require(focused("activation-source"), "broker prompt took focus over fullscreen");
+        require(getFromSocket("/deferreddialogs").contains(R"("class":"activation-prompt")"), "broker prompt missing from deferred dialog list");
+        require(getFromSocket("/dispatch hl.dsp.window.reveal_deferred_dialog({window = 'class:activation-prompt'})") == "ok", "could not show deferred prompt");
+        require(focused("activation-prompt"), "revealed prompt did not take focus");
+        require(getFromSocket("/deferreddialogs") == "[]", "revealed prompt stayed deferred");
+    }
+
+    FULLSCREEN_SOURCE();
+    {
+        CActivationClient prompt("activation-prompt");
+        require(getFromSocket("/deferreddialogs").contains("activation-prompt"), "broker prompt was not deferred again");
+    }
+    require(getFromSocket("/deferreddialogs") == "[]", "closed prompt stayed deferred");
+    require(focused("activation-source"), "closing a deferred prompt moved focus");
+
+    source.press();
+    {
+        CActivationClient prompt("activation-prompt", source.mint(source.m_seat, source.m_press));
+        require(focused("activation-prompt"), "fresh token did not immediately show a broker prompt");
+        require(getFromSocket("/deferreddialogs") == "[]", "trusted prompt was deferred");
+    }
+
+    require(getFromSocket("/dispatch hl.dsp.window.fullscreen({window = 'class:activation-source', mode = 'fullscreen', action = 'unset'})") == "ok",
+            "could not leave fullscreen after broker prompt tests");
 
     require(getFromSocket("/dispatch hl.dsp.focus({window = 'class:activation-source'})") == "ok", "could not refocus source");
     require(getFromSocket("/eval hl.window_rule({match = {class = 'activation-target'}, focus_on_activate = false})") == "ok", "could not set target rule");
