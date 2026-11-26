@@ -13,6 +13,7 @@ constexpr size_t MAX_SERIAL_STORE_LEN = 100;
 class CWLSurfaceResource;
 class CWLSeatResource;
 class IPointer;
+class CClipboardPersistence;
 
 class IKeyboardEventHandler {
   public:
@@ -154,6 +155,9 @@ class CSeatManager {
     } m_selection;
 
     void setCurrentSelection(SP<IDataSource> source);
+    void        clipboardOwnerGone();
+    void        clearRetainedClipboard();
+    static bool primarySelectionEnabled();
     void setCurrentPrimarySelection(SP<IDataSource> source);
 
     // do not write to directly, use set...
@@ -195,6 +199,9 @@ class CSeatManager {
         CHyprSignalListener pointerSurfaceDestroy;
         CHyprSignalListener touchSurfaceDestroy;
     } m_listeners;
+
+    SP<CClipboardPersistence> m_retainedClipboard;
+    CHyprSignalListener       m_clipboardConfigReload;
 
     Vector2D m_lastLocalCoords;
     int      m_touchLocks = 0; // we assume there aint like 20 touch devices at once...

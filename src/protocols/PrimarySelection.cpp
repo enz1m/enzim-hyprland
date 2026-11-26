@@ -2,7 +2,6 @@
 #include <algorithm>
 #include "../managers/SeatManager.hpp"
 #include "core/Seat.hpp"
-#include "../config/ConfigValue.hpp"
 using namespace Hyprutils::OS;
 
 CPrimarySelectionOffer::CPrimarySelectionOffer(SP<CZwpPrimarySelectionOfferV1> resource_, SP<IDataSource> source_) : m_source(source_), m_resource(resource_) {
@@ -112,14 +111,6 @@ CPrimarySelectionDevice::CPrimarySelectionDevice(SP<CZwpPrimarySelectionDeviceV1
     m_resource->setOnDestroy([this](CZwpPrimarySelectionDeviceV1* r) { PROTO::primarySelection->destroyResource(this); });
 
     m_resource->setSetSelection([](CZwpPrimarySelectionDeviceV1* r, wl_resource* sourceR, uint32_t serial) {
-        static auto PPRIMARYSEL = CConfigValue<Config::INTEGER>("misc:middle_click_paste");
-
-        if (!*PPRIMARYSEL) {
-            LOG(Log::DEBUG, "Ignoring primary selection: disabled in config");
-            g_pSeatManager->setCurrentPrimarySelection(nullptr);
-            return;
-        }
-
         auto source = sourceR ? CPrimarySelectionSource::fromResource(sourceR) : CSharedPointer<CPrimarySelectionSource>{};
         if (!source) {
             LOG(Log::DEBUG, "wlr reset selection received");
@@ -298,7 +289,6 @@ void CPrimarySelectionProtocol::setSelection(SP<IDataSource> source) {
 
     if (!DESTDEVICE) {
         LOG(Log::DEBUG, "CWLDataDeviceProtocol::setSelection: cannot send selection to a client without a data_device");
-        g_pSeatManager->m_selection.currentPrimarySelection.reset();
         return;
     }
 

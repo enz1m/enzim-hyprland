@@ -101,6 +101,7 @@ void CSessionLockManager::onNewSessionLock(SP<CSessionLock> pLock) {
             g_pHyprRenderer->damageMonitor(m);
     });
 
+    g_pSeatManager->clearRetainedClipboard();
     m_events.lock.emit();
 
     Desktop::focusState()->rawSurfaceFocus(nullptr);
@@ -244,6 +245,7 @@ void CSessionLockManager::forceUnlock() {
 
 void CSessionLockManager::forceLock() {
     PROTO::sessionLock->forceLock();
+    g_pSeatManager->clearRetainedClipboard();
     m_events.lock.emit();
 }
 

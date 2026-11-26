@@ -1,4 +1,8 @@
 #include "SeatManager.hpp"
+#include "ClipboardPersistence.hpp"
+#include "SessionLockManager.hpp"
+#include "../config/ConfigValue.hpp"
+#include "../event/EventBus.hpp"
 #include "../protocols/core/Seat.hpp"
 #include "../protocols/core/DataDevice.hpp"
 #include "../protocols/DataDeviceWlr.hpp"
@@ -88,8 +92,24 @@ void CKeyboardEventHandlerStack::pruneHandlers() {
     std::erase_if(m_handlers, [](const auto& handler) { return handler.expired(); });
 }
 
+static bool preserveClipboard() {
+    static auto PKEEP = CConfigValue<Config::INTEGER>("misc:clipboard_persistence");
+    return *PKEEP;
+}
+
+bool CSeatManager::primarySelectionEnabled() {
+    static auto PPRIMARY = CConfigValue<Config::INTEGER>("misc:middle_click_paste");
+    return *PPRIMARY;
+}
+
 CSeatManager::CSeatManager() {
     m_listeners.newSeatResource = PROTO::seat->m_events.newSeatResource.listen([this](const auto& resource) { onNewSeatResource(resource); });
+    m_clipboardConfigReload     = Event::bus()->m_events.config.props_refreshed.listen([this](bool) {
+        if (!preserveClipboard())
+            clearRetainedClipboard();
+        if (!primarySelectionEnabled() && m_selection.currentPrimarySelection)
+            setCurrentPrimarySelection(nullptr);
+    });
 }
 
 CSeatManager::SSeatResourceContainer::SSeatResourceContainer(SP<CWLSeatResource> res) : resource(res) {
@@ -725,6 +745,9 @@ void CSeatManager::setCurrentSelection(SP<IDataSource> source) {
     if (m_selection.currentSelection)
         m_selection.currentSelection->cancelled();
 
+    if (source.get() != m_retainedClipboard.get())
+        m_retainedClipboard.reset();
+
     if (!source) {
         PROTO::data->setSelection(nullptr);
         PROTO::dataWlr->setSelection(nullptr, false);
@@ -734,16 +757,43 @@ void CSeatManager::setCurrentSelection(SP<IDataSource> source) {
     m_selection.currentSelection = source;
 
     if (source) {
-        m_selection.destroySelection = source->m_events.destroy.listen([this] { setCurrentSelection(nullptr); });
+        m_selection.destroySelection = source->m_events.destroy.listen([this] { clipboardOwnerGone(); });
         PROTO::data->setSelection(source);
         PROTO::dataWlr->setSelection(source, false);
         PROTO::extDataDevice->setSelection(source, false);
+        if (!m_retainedClipboard && preserveClipboard() && g_pSessionLockManager && !g_pSessionLockManager->isSessionLocked()) {
+            m_retainedClipboard = makeShared<CClipboardPersistence>(g_pCompositor->m_wlEventLoop);
+            m_retainedClipboard->capture(*source);
+        }
     }
 
     m_events.setSelection.emit();
 }
 
+void CSeatManager::clipboardOwnerGone() {
+    if (m_retainedClipboard) {
+        m_retainedClipboard->finishCapture();
+        if (!m_retainedClipboard->mimes().empty()) {
+            setCurrentSelection(m_retainedClipboard);
+            return;
+        }
+    }
+    setCurrentSelection(nullptr);
+}
+
+void CSeatManager::clearRetainedClipboard() {
+    if (m_retainedClipboard && m_selection.currentSelection.lock().get() == m_retainedClipboard.get())
+        setCurrentSelection(nullptr);
+    else
+        m_retainedClipboard.reset();
+}
+
 void CSeatManager::setCurrentPrimarySelection(SP<IDataSource> source) {
+    if (source && !primarySelectionEnabled()) {
+        source->cancelled();
+        return;
+    }
+
     if (source == m_selection.currentPrimarySelection) {
         LOG(Log::WARN, "[seat] duplicated setCurrentPrimarySelection?");
         return;
