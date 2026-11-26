@@ -9,7 +9,7 @@
 #include "../helpers/math/Math.hpp"
 #include "../helpers/signal/Signal.hpp"
 #include "types/SurfaceRole.hpp"
-#include "types/QueuedGeometry.hpp"
+#include "types/QueuedXDGState.hpp"
 
 class CXDGWMBase;
 class CXDGPositionerResource;
@@ -202,9 +202,7 @@ class CXDGSurfaceResource {
 
     WP<CXDGSurfaceResource>        m_self;
 
-    struct {
-        CBox geometry;
-    } m_pending, m_current;
+    CQueuedXDGState::SState        m_pending, m_current;
 
     struct {
         CSignalT<uint32_t>              ack;
@@ -238,8 +236,9 @@ class CXDGSurfaceResource {
         CHyprSignalListener surfaceCommit;
     } m_listeners;
 
-    CQueuedGeometry     m_queuedGeometry;
-    bool                m_directCommit = false;
+    CQueuedXDGState     m_queuedState;
+    bool                m_lastQueuedServerDecorations = false;
+    bool                m_directCommit                = false;
     CHyprSignalListener m_surfacePrecommit;
     CHyprSignalListener m_surfaceStateCommit;
 

@@ -1,14 +1,6 @@
 #include "XDGDecoration.hpp"
 #include "XDGShell.hpp"
-#include "../desktop/view/window/Window.hpp"
-#include "../desktop/view/window/WindowPresentation.hpp"
 #include <algorithm>
-
-static void refreshWindowDecorations(const WP<CXDGToplevelResource>& toplevel) {
-    const auto TOPLEVEL = toplevel.lock();
-    if (const auto WINDOW = TOPLEVEL ? TOPLEVEL->m_window.lock() : nullptr)
-        WINDOW->presentation().onDecorationModeChanged();
-}
 
 CXDGDecoration::CXDGDecoration(SP<CZxdgToplevelDecorationV1> resource_, wl_resource* toplevel) :
     m_resource(resource_), m_toplevelResource(toplevel), m_toplevel(CXDGToplevelResource::fromResource(toplevel)) {
@@ -19,48 +11,49 @@ CXDGDecoration::CXDGDecoration(SP<CZxdgToplevelDecorationV1> resource_, wl_resou
     m_resource->setOnDestroy([this](CZxdgToplevelDecorationV1* pMgr) { PROTO::xdgDecoration->destroyDecoration(this); });
 
     m_resource->setSetMode([this](CZxdgToplevelDecorationV1*, zxdgToplevelDecorationV1Mode mode) {
-        std::string modeString;
         switch (mode) {
-            case ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE: modeString = "MODE_CLIENT_SIDE"; break;
-            case ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE: modeString = "MODE_SERVER_SIDE"; break;
-            default: modeString = "INVALID"; break;
+            case ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE:
+            case ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE: sendMode(mode); break;
+            default: m_resource->error(ZXDG_TOPLEVEL_DECORATION_V1_ERROR_INVALID_MODE, "Invalid decoration mode"); break;
         }
-
-        auto sendMode = xdgModeOnRequestCSD(mode);
-        LOG(Log::DEBUG, "setMode: {}. Sending {} as reply.", modeString, sendMode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE ? "MODE_CLIENT_SIDE" : "MODE_SERVER_SIDE");
-        mostRecentlyRequested = mode;
-        this->sendMode(sendMode);
     });
+    m_resource->setUnsetMode([this](CZxdgToplevelDecorationV1*) { sendMode(ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE); });
 
-    m_resource->setUnsetMode([this](CZxdgToplevelDecorationV1*) {
-        LOG(Log::DEBUG, "unsetMode. Sending MODE_SERVER_SIDE.");
-        mostRecentlyRequested = 0;
-        sendMode(xdgModeOnReleaseCSD());
-    });
-
-    sendMode(xdgDefaultModeCSD());
+    if (const auto TOPLEVEL = m_toplevel.lock(); TOPLEVEL && TOPLEVEL->m_owner) {
+        // Recreating the object before a surface commit preserves the prior mode until configure is acknowledged.
+        if (TOPLEVEL->m_owner->m_pending.serverDecorations)
+            m_ackedMode = ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+        m_ack = TOPLEVEL->m_owner->m_events.ack.listen([this](uint32_t serial) {
+            while (!m_configures.empty() && sc<int32_t>(serial - m_configures.front().first) >= 0) {
+                m_ackedMode = m_configures.front().second;
+                m_configures.pop_front();
+            }
+        });
+    }
+    sendMode(ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 }
 
 void CXDGDecoration::sendMode(zxdgToplevelDecorationV1Mode mode) {
-    m_resource->sendConfigure(mode);
-    const bool CHANGED = mostRecentlySent != mode;
-    mostRecentlySent   = mode;
-    if (CHANGED)
-        refreshWindowDecorations(m_toplevel);
+    if (m_pendingMode == mode)
+        return;
+
+    m_pendingMode = mode;
+    if (const auto TOPLEVEL = m_toplevel.lock(); TOPLEVEL && TOPLEVEL->m_owner && !TOPLEVEL->m_owner->m_initialCommit)
+        TOPLEVEL->m_owner->scheduleConfigure();
 }
 
-zxdgToplevelDecorationV1Mode CXDGDecoration::xdgDefaultModeCSD() {
-    return ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
-}
+void CXDGDecorationProtocol::configure(SP<CXDGToplevelResource> toplevel, uint32_t serial) {
+    if (!toplevel)
+        return;
 
-zxdgToplevelDecorationV1Mode CXDGDecoration::xdgModeOnRequestCSD(uint32_t modeRequestedByClient) {
-    if (modeRequestedByClient == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE)
-        return ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
-    return xdgDefaultModeCSD();
-}
-
-zxdgToplevelDecorationV1Mode CXDGDecoration::xdgModeOnReleaseCSD() {
-    return xdgDefaultModeCSD();
+    for (const auto& [_, decoration] : m_decorations) {
+        if (decoration->m_toplevel != toplevel || decoration->m_sentMode == decoration->m_pendingMode)
+            continue;
+        decoration->m_resource->sendConfigure(decoration->m_pendingMode);
+        decoration->m_sentMode = decoration->m_pendingMode;
+        decoration->m_configures.emplace_back(serial, decoration->m_pendingMode);
+        return;
+    }
 }
 
 bool CXDGDecoration::good() {
@@ -88,9 +81,7 @@ void CXDGDecorationProtocol::onManagerResourceDestroy(wl_resource* res) {
 }
 
 void CXDGDecorationProtocol::destroyDecoration(CXDGDecoration* decoration) {
-    const auto TOPLEVEL = decoration->m_toplevel;
     m_decorations.erase(decoration->toplevelResource());
-    refreshWindowDecorations(TOPLEVEL);
 }
 
 std::optional<zxdgToplevelDecorationV1Mode> CXDGDecorationProtocol::modeFor(SP<CXDGToplevelResource> toplevel) const {
@@ -98,8 +89,8 @@ std::optional<zxdgToplevelDecorationV1Mode> CXDGDecorationProtocol::modeFor(SP<C
         return std::nullopt;
 
     for (const auto& [_, decoration] : m_decorations) {
-        if (decoration->m_toplevel == toplevel && decoration->mostRecentlySent)
-            return sc<zxdgToplevelDecorationV1Mode>(decoration->mostRecentlySent);
+        if (decoration->m_toplevel == toplevel)
+            return decoration->m_ackedMode.value_or(ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
     }
 
     return std::nullopt;

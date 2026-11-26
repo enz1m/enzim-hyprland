@@ -19,7 +19,8 @@ namespace Layout::Supplementary {
         CDragStateController()  = default;
         ~CDragStateController() = default;
 
-        void           dragBegin(SP<ITarget> target, eMouseBindMode mode, std::optional<Layout::eRectCorner> forcedEdge = std::nullopt, bool exclusiveDeviceGrab = false);
+        void           dragBegin(SP<ITarget> target, eMouseBindMode mode, std::optional<Layout::eRectCorner> forcedEdge = std::nullopt, bool exclusiveDeviceGrab = false,
+                                 std::optional<Vector2D> grabPosition = std::nullopt);
         bool           dragEnd();
 
         void           mouseMove(const Vector2D& mousePos);
@@ -35,9 +36,9 @@ namespace Layout::Supplementary {
             Updates drag related variables and floats window if threshold reached.
             Return true to reject
         */
-        bool        updateDragWindow();
+        bool                updateDragWindow();
 
-        SP<ITarget> target() const;
+        SP<ITarget>         target() const;
 
         void                onWindowCommit(PHLWINDOW window);
         std::optional<CBox> committedResizeRequest(const ITarget* target) const;
@@ -75,7 +76,9 @@ namespace Layout::Supplementary {
             Layout::eRectCorner corner = sc<Layout::eRectCorner>(0) /* CORNER_NONE */;
         } m_committedResize;
 
-        bool showCommittedSize(const SP<ITarget>& target);
-        void finishCommittedResize();
+        std::optional<Vector2D> m_grabPosition;
+
+        bool                    showCommittedSize(const SP<ITarget>& target);
+        void                    finishCommittedResize();
     };
 };

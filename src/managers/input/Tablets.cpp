@@ -1,4 +1,5 @@
 #include "InputManager.hpp"
+#include "../../render/decorations/CHyprTitleBarDecoration.hpp"
 #include "../../desktop/view/window/Window.hpp"
 #include "../../protocols/Tablet.hpp"
 #include "../../devices/Tablet.hpp"
@@ -38,7 +39,8 @@ static void focusTool(SP<CTabletTool> tool, SP<CTablet> tablet, SP<CWLSurfaceRes
 }
 
 static void refocusTablet(SP<CTablet> tab, SP<CTabletTool> tool, bool motion = false) {
-    const auto LASTHLSURFACE = Desktop::View::CWLSurface::fromResource(g_pSeatManager->m_state.pointerFocus.lock());
+    const auto SURFACE       = tool->m_isDown && !PROTO::data->dndActive() ? tool->getSurface() : g_pSeatManager->m_state.pointerFocus.lock();
+    const auto LASTHLSURFACE = Desktop::View::CWLSurface::fromResource(SURFACE);
 
     if (!LASTHLSURFACE || !tool->m_active) {
         if (tool->getSurface())
@@ -58,7 +60,7 @@ static void refocusTablet(SP<CTablet> tab, SP<CTabletTool> tool, bool motion = f
 
     const auto CURSORPOS = g_pInputManager->getMouseCoordsInternal();
 
-    focusTool(tool, tab, g_pSeatManager->m_state.pointerFocus.lock());
+    focusTool(tool, tab, SURFACE);
 
     if (!motion)
         return;
@@ -144,11 +146,16 @@ void CInputManager::onTabletAxis(CTablet::SAxisEvent e) {
         }
 
         m_lastInputTouch = false;
+        if (CHyprTitleBarDecoration::moveContact({PTOOL.get(), 0}, getMouseCoordsInternal()))
+            return;
         if (!PTOOL->m_isDown || PROTO::data->dndActive())
             simulateMouseMovement();
         refocusTablet(PTAB, PTOOL, true);
         m_lastCursorMovement.reset();
     }
+
+    if (CHyprTitleBarDecoration::ownsContact({PTOOL.get(), 0}))
+        return;
 
     if (e.updatedAxes & CTablet::eTabletToolAxes::HID_TABLET_TOOL_AXIS_PRESSURE)
         PROTO::tablet->pressure(PTOOL, e.pressure);
@@ -178,20 +185,29 @@ void CInputManager::onTabletAxis(CTablet::SAxisEvent e) {
 void CInputManager::onTabletTip(CTablet::STipEvent e) {
     Event::SCallbackInfo info;
     Event::bus()->m_events.input.tablet.tip.emit(e, info);
-    if (info.cancelled)
-        return;
 
     const auto PTAB  = e.tablet;
     const auto PTOOL = ensureTabletToolPresent(e.tool);
-    const auto POS   = e.tip;
+    if (info.cancelled) {
+        if (!e.in)
+            CHyprTitleBarDecoration::endContact({PTOOL.get(), 0}, std::nullopt, e.timeMs, true);
+        return;
+    }
+    const auto POS = e.tip;
 
     if (PTAB->m_relativeInput)
         Pointer::mgr()->move({0, 0});
     else
         Pointer::mgr()->warpAbsolute(transformToActiveRegion(POS, PTAB->m_activeArea), PTAB);
 
-    if (e.in)
+    if (e.in) {
         refocus();
+        if (m_foundLSToFocus.expired() && CHyprTitleBarDecoration::beginContact({PTOOL.get(), 0}, m_foundWindowToFocus.lock(), getMouseCoordsInternal(), e.timeMs)) {
+            unfocusTool(PTOOL);
+            return;
+        }
+    } else if (CHyprTitleBarDecoration::endContact({PTOOL.get(), 0}, getMouseCoordsInternal(), e.timeMs) || !PTOOL->m_isDown)
+        return;
 
     refocusTablet(PTAB, PTOOL, true);
 
@@ -210,6 +226,8 @@ void CInputManager::onTabletButton(CTablet::SButtonEvent e) {
         return;
 
     const auto PTOOL = ensureTabletToolPresent(e.tool);
+    if (CHyprTitleBarDecoration::ownsContact({PTOOL.get(), 0}))
+        return;
 
     if (e.down)
         refocus();
@@ -234,9 +252,11 @@ void CInputManager::onTabletProximity(CTablet::SProximityEvent e) {
     PTOOL->m_active = e.in;
 
     if (!e.in) {
+        CHyprTitleBarDecoration::endContact({PTOOL.get(), 0}, std::nullopt, e.timeMs, true);
         m_lastInputTablet = false;
         if (PTOOL->getSurface())
             unfocusTool(PTOOL);
+        PTOOL->m_isDown = false;
     } else {
         m_lastInputTablet = true;
         simulateMouseMovement();

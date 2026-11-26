@@ -1,4 +1,5 @@
 #include "InputManager.hpp"
+#include "../../render/decorations/CHyprTitleBarDecoration.hpp"
 #include "../SessionLockManager.hpp"
 #include "../../protocols/SessionLock.hpp"
 #include "../../protocols/XDGActivation.hpp"
@@ -38,6 +39,9 @@ void CInputManager::onTouchDown(ITouch::SDownEvent e) {
 
     PMONITOR = PMONITOR ? PMONITOR : Desktop::focusState()->monitor();
 
+    if (!PMONITOR)
+        return;
+
     if (PMONITOR != Desktop::focusState()->monitor())
         Desktop::focusState()->rawMonitorFocus(PMONITOR);
 
@@ -58,7 +62,11 @@ void CInputManager::onTouchDown(ITouch::SDownEvent e) {
     if (g_pUnifiedWorkspaceSwipe->isGestureInProgress()) {
         return;
         // TODO: Don't swipe if you touched a floating window.
-    } else if (*PSWIPETOUCH && (m_foundLSToFocus.expired() || m_foundLSToFocus->m_layer <= 1) && !g_pSessionLockManager->isSessionLocked()) {
+    }
+    if (m_foundLSToFocus.expired() && CHyprTitleBarDecoration::beginContact({e.device.get(), e.touchID}, m_foundWindowToFocus.lock(), TOUCH_COORDS, e.timeMs, true, PMONITOR))
+        return;
+
+    if (*PSWIPETOUCH && (m_foundLSToFocus.expired() || m_foundLSToFocus->m_layer <= 1) && !g_pSessionLockManager->isSessionLocked()) {
         const auto   PWORKSPACE  = PMONITOR->m_activeWorkspace;
         const auto   STYLE       = PWORKSPACE->m_renderOffset->getStyle();
         const bool   VERTANIMS   = STYLE == "slidevert" || STYLE.starts_with("slidefadevert");
@@ -85,6 +93,8 @@ void CInputManager::onTouchDown(ITouch::SDownEvent e) {
         else
             m_touchData.touchFocusSurface = m_touchData.touchFocusLockSurface->surface->surface();
     } else {
+        if (m_foundSurfaceToFocus.expired())
+            return;
         m_touchData.touchFocusLockSurface.reset();
         m_touchData.touchFocusWindow  = m_foundWindowToFocus;
         m_touchData.touchFocusSurface = m_foundSurfaceToFocus;
@@ -121,12 +131,12 @@ void CInputManager::onTouchDown(ITouch::SDownEvent e) {
     g_pSeatManager->sendTouchDown(m_touchData.touchFocusSurface.lock(), e.timeMs, e.touchID, local, USER_PRESS);
 }
 
-void CInputManager::onTouchUp(ITouch::SUpEvent e) {
+void CInputManager::onTouchUp(ITouch::SUpEvent e, const SP<ITouch>& device) {
     m_lastInputTouch = true;
 
     Event::SCallbackInfo info;
     Event::bus()->m_events.input.touch.up.emit(e, info);
-    if (info.cancelled)
+    if (CHyprTitleBarDecoration::endContact({device.get(), e.touchID}, std::nullopt, e.timeMs, info.cancelled) || info.cancelled)
         return;
 
     if (g_pUnifiedWorkspaceSwipe->isGestureInProgress()) {
@@ -140,7 +150,12 @@ void CInputManager::onTouchUp(ITouch::SUpEvent e) {
         g_pSeatManager->sendTouchUp(e.timeMs, e.touchID);
 }
 
-void CInputManager::onTouchMove(ITouch::SMotionEvent e) {
+void CInputManager::onTouchCancel(ITouch::SCancelEvent e, const SP<ITouch>& device) {
+    if (!CHyprTitleBarDecoration::endContact({device.get(), e.touchID}, std::nullopt, e.timeMs, true))
+        g_pSeatManager->sendTouchCancel();
+}
+
+void CInputManager::onTouchMove(ITouch::SMotionEvent e, const SP<ITouch>& device) {
     m_lastInputTouch = true;
 
     m_lastCursorMovement.reset();
@@ -153,7 +168,7 @@ void CInputManager::onTouchMove(ITouch::SMotionEvent e) {
 
     Event::SCallbackInfo info;
     Event::bus()->m_events.input.touch.motion.emit(e, info);
-    if (info.cancelled)
+    if (info.cancelled || CHyprTitleBarDecoration::moveTouchContact({device.get(), e.touchID}, e.pos))
         return;
 
     if (g_pUnifiedWorkspaceSwipe->isGestureInProgress()) {

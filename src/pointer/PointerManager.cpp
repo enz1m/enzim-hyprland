@@ -1119,17 +1119,22 @@ void CPointerManager::attachTouch(SP<ITouch> touch) {
             Config::Actions::dpms(Config::Actions::TOGGLE_ACTION_ENABLE, std::nullopt);
     });
 
-    listener->up = touch->m_touchEvents.up.listen([](const ITouch::SUpEvent& event) {
-        g_pInputManager->onTouchUp(event);
+    listener->up = touch->m_touchEvents.up.listen([device = touch->m_self](const ITouch::SUpEvent& event) {
+        if (const auto TOUCH = device.lock())
+            g_pInputManager->onTouchUp(event, TOUCH);
         PROTO::idle->onActivity();
     });
 
-    listener->motion = touch->m_touchEvents.motion.listen([](const ITouch::SMotionEvent& event) {
-        g_pInputManager->onTouchMove(event);
+    listener->motion = touch->m_touchEvents.motion.listen([device = touch->m_self](const ITouch::SMotionEvent& event) {
+        if (const auto TOUCH = device.lock())
+            g_pInputManager->onTouchMove(event, TOUCH);
         PROTO::idle->onActivity();
     });
 
-    listener->cancel = touch->m_touchEvents.cancel.listen([] { g_pSeatManager->sendTouchCancel(); });
+    listener->cancel = touch->m_touchEvents.cancel.listen([device = touch->m_self](const ITouch::SCancelEvent& event) {
+        if (const auto TOUCH = device.lock())
+            g_pInputManager->onTouchCancel(event, TOUCH);
+    });
 
     listener->frame = touch->m_touchEvents.frame.listen([] { g_pSeatManager->sendTouchFrame(); });
 

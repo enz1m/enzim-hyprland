@@ -1558,7 +1558,7 @@ WP<CShader> CHyprOpenGLImpl::renderToFBInternal(SP<ITexture> tex, const STexture
     }
 
     auto roundingBox = newBox;
-    if (data.roundingTopExtension > 0 && m_renderData.pMonitor->m_transform == WL_OUTPUT_TRANSFORM_NORMAL) {
+    if (data.roundingTopExtension > 0) {
         roundingBox.y -= data.roundingTopExtension;
         roundingBox.height += data.roundingTopExtension;
     }

@@ -27,7 +27,7 @@ using namespace Layout::Supplementary;
 
 static PHLWINDOWREF s_maximizedRestoreWindow;
 
-static bool isResizeMode(eMouseBindMode mode) {
+static bool         isResizeMode(eMouseBindMode mode) {
     return mode == MBIND_RESIZE || mode == MBIND_RESIZE_FORCE_RATIO || mode == MBIND_RESIZE_BLOCK_RATIO;
 }
 
@@ -178,7 +178,7 @@ bool CDragStateController::updateDragWindow() {
     // grab point keeps its relative position: grabbing 80% across the fullscreen surface leaves the
     // cursor 80% across the restored window
     const auto MAPDRAGHOTSPOT = [this](const SP<ITarget>& target, const CBox& oldBox) {
-        const auto MOUSECOORDS = g_pInputManager->getMouseCoordsInternal();
+        const auto MOUSECOORDS = m_grabPosition.value_or(g_pInputManager->getMouseCoordsInternal());
         const auto NEWSIZE     = target->position().size();
         const auto OLDSIZE     = oldBox.size();
 
@@ -231,7 +231,7 @@ bool CDragStateController::updateDragWindow() {
 
     const auto DRAG_ORIGINAL_BOX = DRAGGINGTARGET->position();
 
-    m_beginDragXY              = g_pInputManager->getMouseCoordsInternal();
+    m_beginDragXY              = m_grabPosition.value_or(g_pInputManager->getMouseCoordsInternal());
     m_beginDragUntransformedXY = Pointer::mgr()->untransformedPosition();
     m_beginDragPositionXY      = DRAG_ORIGINAL_BOX.pos();
     m_beginDragSizeXY          = DRAG_ORIGINAL_BOX.size();
@@ -241,11 +241,13 @@ bool CDragStateController::updateDragWindow() {
     return false;
 }
 
-void CDragStateController::dragBegin(SP<ITarget> target, eMouseBindMode mode, std::optional<eRectCorner> forcedEdge, bool exclusiveDeviceGrab) {
+void CDragStateController::dragBegin(SP<ITarget> target, eMouseBindMode mode, std::optional<eRectCorner> forcedEdge, bool exclusiveDeviceGrab,
+                                     std::optional<Vector2D> grabPosition) {
     s_maximizedRestoreWindow.reset();
     if (m_committedResize.target.lock() != target || !isResizeMode(mode))
         finishCommittedResize();
 
+    m_grabPosition        = grabPosition;
     m_target              = target;
     m_dragMode            = mode;
     m_draggingTiled       = false;
@@ -272,9 +274,8 @@ void CDragStateController::dragBegin(SP<ITarget> target, eMouseBindMode mode, st
         return;
     }
 
-    // Try to pick up dragged window now if drag_threshold is disabled
-    // or at least update dragging related variables for the cursors
-    m_dragThresholdReached = *PDRAGTHRESHOLD <= 0;
+    // A title bar supplies a grab position after already crossing the drag threshold.
+    m_dragThresholdReached = m_grabPosition.has_value() || *PDRAGTHRESHOLD <= 0;
     if (updateDragWindow())
         return;
 
@@ -369,7 +370,7 @@ bool CDragStateController::dragEnd() {
 
         const auto DRAGGING_WINDOW = draggingTarget->window();
 
-        const auto MOUSECOORDS = g_pInputManager->getMouseCoordsInternal();
+        const auto MOUSECOORDS = m_grabPosition ? m_lastDragXY : g_pInputManager->getMouseCoordsInternal();
         PHLWINDOW  pWindow =
             Desktop::viewState()->hitTest().windowAt(MOUSECOORDS, Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING, DRAGGING_WINDOW);
 

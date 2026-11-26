@@ -8,6 +8,9 @@
 #include "../../event/EventBus.hpp"
 #include "../../ipc/s2/S2.hpp"
 #include "../../layout/target/WindowTarget.hpp"
+#include "../../layout/LayoutManager.hpp"
+#include "../../layout/supplementary/DragController.hpp"
+#include "../../managers/SessionLockManager.hpp"
 #include "../../managers/fullscreen/FullscreenController.hpp"
 #include "../../output/Monitor.hpp"
 #include "../Renderer.hpp"
@@ -23,7 +26,11 @@
 
 using namespace Render;
 
-static constexpr uint32_t BUTTON_LEFT = 0x110;
+std::map<CHyprTitleBarDecoration::Contact, CHyprTitleBarDecoration::SContact> CHyprTitleBarDecoration::s_contacts;
+std::optional<CHyprTitleBarDecoration::Contact>                               CHyprTitleBarDecoration::s_dragContact;
+CHyprSignalListener                                                           CHyprTitleBarDecoration::s_dragEnded;
+
+static constexpr double                                                       DEFAULT_DRAG_THRESHOLD = 4;
 
 // A cluster of several controls shares one pill whose padding each control gives up.
 static constexpr double PILL_PADDING = 2;
@@ -150,10 +157,7 @@ CHyprTitleBarDecoration::SButtonLayout CHyprTitleBarDecoration::parseButtonLayou
     return result;
 }
 
-CHyprTitleBarDecoration::~CHyprTitleBarDecoration() {
-    if (s_pressOwner == this)
-        s_pressOwner = nullptr;
-}
+CHyprTitleBarDecoration::~CHyprTitleBarDecoration() = default;
 
 CHyprTitleBarDecoration::CHyprTitleBarDecoration(PHLWINDOW pWindow) : IHyprWindowDecoration(pWindow) {
     m_mouseMove      = Event::bus()->m_events.input.mouse.move.listen([this](Vector2D pos, Event::SCallbackInfo&) { onPointerMove(pos); });
@@ -196,7 +200,7 @@ void CHyprTitleBarDecoration::refresh() {
 
     m_shown   = WANTED;
     m_hovered = std::nullopt;
-    m_pressed = std::nullopt;
+    m_lastTap.reset();
     g_pDecorationPositioner->repositionDeco(this);
 
     if (WINDOW && WINDOW->layoutTarget())
@@ -245,7 +249,7 @@ eDecorationLayer CHyprTitleBarDecoration::getDecorationLayer() {
 }
 
 uint64_t CHyprTitleBarDecoration::getDecorationFlags() {
-    return DECORATION_ALLOWS_MOUSE_INPUT | DECORATION_PART_OF_MAIN_WINDOW;
+    return DECORATION_PART_OF_MAIN_WINDOW;
 }
 
 std::string CHyprTitleBarDecoration::getDisplayName() {
@@ -342,24 +346,25 @@ void CHyprTitleBarDecoration::draw(PHLMONITOR pMonitor, float const& a) {
     CHyprColor background = FOCUSED ? CHyprColor(sc<uint64_t>(*PACTIVE)) : colorOr(*PINACTIVE, *PACTIVE);
     background.a *= a;
 
-    // The fill reaches under the window so the squared window corners meet it without a seam.
+    // Extend the rounded shape past the clip to square its bottom corners.
     const double                ROUNDING = WINDOW->presentation().rounding() * pMonitor->m_scale;
     const double                OVERLAP  = std::ceil(ROUNDING) + 1;
 
     CRectPassElement::SRectData rect;
     rect.color         = background;
     rect.box           = {barPx.x, barPx.y, barPx.w, barPx.h + OVERLAP};
-    rect.clipBox       = rect.box;
+    rect.clipBox       = barPx;
     rect.round         = sc<int>(std::round(ROUNDING));
     rect.roundingPower = WINDOW->presentation().roundingPower();
     g_pHyprRenderer->addPassElement(makeUnique<CRectPassElement>(rect));
 
     const auto LAYOUT = layout(m_assignedBox.w);
+    auto&      cache  = m_caches[pMonitor->m_scale];
     drawTitle(pMonitor, LAYOUT, barPx, a);
     if (!LAYOUT.leading.empty())
-        drawCluster(pMonitor, LAYOUT, LAYOUT.leading, barPx, a, m_leadingCache);
+        drawCluster(pMonitor, LAYOUT, LAYOUT.leading, barPx, a, cache.leading);
     if (!LAYOUT.trailing.empty())
-        drawCluster(pMonitor, LAYOUT, LAYOUT.trailing, barPx, a, m_trailingCache);
+        drawCluster(pMonitor, LAYOUT, LAYOUT.trailing, barPx, a, cache.trailing);
 }
 
 void CHyprTitleBarDecoration::drawTitle(PHLMONITOR pMonitor, const SLayout& layout, const CBox& barPx, float a) {
@@ -382,7 +387,8 @@ void CHyprTitleBarDecoration::drawTitle(PHLMONITOR pMonitor, const SLayout& layo
     const std::string FONT    = *PFONT != STRVAL_EMPTY && !(*PFONT).empty() ? *PFONT : *PFALLBACKFONT;
     const auto        KEY     = std::format("{}|{}|{}|{}|{}|{}|{:x}", TITLE, SCALE, WIDTH, FONT, *PFONTSIZE, *PFONTWEIGHT, COLOR.getAsHex());
 
-    if (m_titleCache.key != KEY || !m_titleCache.texture) {
+    auto&             cache = m_caches[pMonitor->m_scale].title;
+    if (cache.key != KEY || !cache.texture) {
         PangoFontMap*         fontMap = pango_cairo_font_map_get_default();
         PangoContext*         context = pango_font_map_create_context(fontMap);
         cairo_font_options_t* options = cairo_font_options_create();
@@ -418,10 +424,10 @@ void CHyprTitleBarDecoration::drawTitle(PHLMONITOR pMonitor, const SLayout& layo
         g_object_unref(text);
         g_object_unref(context);
 
-        m_titleCache = {KEY, textureFrom(surface)};
+        cache = {KEY, textureFrom(surface)};
     }
 
-    const auto& TEXTURE = m_titleCache.texture;
+    const auto& TEXTURE = cache.texture;
     if (!TEXTURE)
         return;
 
@@ -457,7 +463,7 @@ void CHyprTitleBarDecoration::drawCluster(PHLMONITOR pMonitor, const SLayout& la
 
     std::string key = std::format("{}|{}|{}|{}|{}|{}|{}|{}|{}", SCALE, PX.w, PX.h, *PGLYPHSIZE, *PBUTTON, *PBUTTONHOVER, *PGLYPH, *PGLYPHHOVER, MAXIMIZED);
     for (const auto i : members)
-        key += std::format("|{}{}", sc<int>(layout.controls[i].kind), ACTIVE == i ? "*" : "");
+        key += std::format("|{}{}", sc<int>(layout.controls[i].kind), ACTIVE == layout.controls[i].kind ? "*" : "");
 
     if (cache.key != key || !cache.texture) {
         const auto BUTTON      = CHyprColor(sc<uint64_t>(*PBUTTON));
@@ -482,7 +488,7 @@ void CHyprTitleBarDecoration::drawCluster(PHLMONITOR pMonitor, const SLayout& la
         for (const auto i : members) {
             const auto&  CONTROL = layout.controls[i];
             const CBox   LOCAL   = CONTROL.box.copy().translate(-cluster.pos());
-            const bool   HOT     = ACTIVE == i;
+            const bool   HOT     = ACTIVE == CONTROL.kind;
             const double INSET   = PILL ? PILL_HOVER_INSET : 0;
             if (!PILL || HOT) {
                 cairo_new_sub_path(cairo);
@@ -518,7 +524,7 @@ void CHyprTitleBarDecoration::drawCluster(PHLMONITOR pMonitor, const SLayout& la
     g_pHyprRenderer->addPassElement(makeUnique<CTexPassElement>(std::move(data)));
 }
 
-std::optional<size_t> CHyprTitleBarDecoration::controlAt(const Vector2D& global) const {
+std::optional<CHyprTitleBarDecoration::eControl> CHyprTitleBarDecoration::controlAt(const Vector2D& global) const {
     const auto WINDOW = owningWindow();
     if (!m_shown || !WINDOW)
         return std::nullopt;
@@ -528,7 +534,7 @@ std::optional<size_t> CHyprTitleBarDecoration::controlAt(const Vector2D& global)
     const auto LOCAL  = global - BAR.pos();
     for (size_t i = 0; i < LAYOUT.controls.size(); ++i) {
         if (LAYOUT.controls[i].box.containsPoint(LOCAL))
-            return i;
+            return LAYOUT.controls[i].kind;
     }
     return std::nullopt;
 }
@@ -537,7 +543,7 @@ void CHyprTitleBarDecoration::onPointerMove(const Vector2D& global) {
     if (!m_shown)
         return;
 
-    std::optional<size_t> hovered;
+    std::optional<eControl> hovered;
     if (const auto WINDOW = owningWindow(); WINDOW && barBoxGlobal().containsPoint(global) &&
         Desktop::viewState()->hitTest().windowAt(global, Desktop::View::ALLOW_FLOATING | Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS) == WINDOW)
         hovered = controlAt(global);
@@ -549,14 +555,9 @@ void CHyprTitleBarDecoration::onPointerMove(const Vector2D& global) {
     damageEntire();
 }
 
-bool CHyprTitleBarDecoration::onInputOnDeco(const eInputType type, const Vector2D& coords, std::any data) {
-    if (!m_shown)
-        return false;
-
-    switch (type) {
-        case INPUT_TYPE_BUTTON: return onButton(coords, std::any_cast<const IPointer::SButtonEvent&>(data));
-        default: return false;
-    }
+bool CHyprTitleBarDecoration::acceptsInputAt(const Vector2D& pos) const {
+    const auto WINDOW = owningWindow();
+    return m_shown && validMapped(WINDOW) && !WINDOW->isHidden() && barBoxGlobal().containsPoint(pos) && !WINDOW->hasPopupAt(pos);
 }
 
 bool CHyprTitleBarDecoration::offers(PHLWINDOW window, eControl control) {
@@ -572,78 +573,139 @@ bool CHyprTitleBarDecoration::offers(PHLWINDOW window, eControl control) {
     return false;
 }
 
-void CHyprTitleBarDecoration::notePress() {
-    s_pressOwner = nullptr;
-}
-
-bool CHyprTitleBarDecoration::onButton(const Vector2D& global, const IPointer::SButtonEvent& e) {
-    const auto WINDOW = owningWindow();
-    if (!WINDOW)
+bool CHyprTitleBarDecoration::beginContact(Contact contact, PHLWINDOW window, const Vector2D& pos, uint32_t time, bool primary, PHLMONITOR monitor) {
+    endContact(contact, std::nullopt, time, true);
+    if (!window || g_pSessionLockManager->isSessionLocked())
         return false;
 
-    if (e.state == WL_POINTER_BUTTON_STATE_RELEASED) {
-        // A release belongs to whoever took its press: a drag that began in the
-        // window and ends over the bar goes back to the client.
-        const bool OURS    = s_pressOwner == this;
-        const auto PRESSED = m_pressed;
-        m_pressed          = std::nullopt;
-        if (!OURS) {
-            if (PRESSED)
-                damageEntire();
-            return false;
-        }
-        s_pressOwner = nullptr;
-        if (e.button != BUTTON_LEFT)
-            return true;
-        damageEntire();
-        const auto CONTROL = controlAt(global);
-        if (PRESSED && PRESSED == CONTROL) {
-            const auto BAR = barBoxGlobal();
-            activate(layout(BAR.w).controls[*PRESSED].kind);
-        }
-        return true;
+    const auto BAR = window->presentation().titleBarAt(pos);
+    if (!BAR)
+        return false;
+
+    s_contacts.emplace(contact, SContact{.owner = BAR, .monitor = monitor, .start = pos, .pos = pos, .control = BAR->controlAt(pos), .primary = primary});
+    if (primary) {
+        if (!Desktop::focusState()->isWindowActive(window))
+            Desktop::focusState()->fullWindowFocus(window, Desktop::FOCUS_REASON_CLICK_DOWN);
+        if (window->isFloating())
+            Desktop::windowState()->raise(window);
     }
-
-    s_pressOwner = this;
-    if (e.button != BUTTON_LEFT)
-        return true;
-
-    const auto CONTROL = controlAt(global);
-
-    if (!Desktop::focusState()->isWindowActive(WINDOW))
-        Desktop::focusState()->fullWindowFocus(WINDOW, Desktop::FOCUS_REASON_CLICK_DOWN);
-    if (WINDOW->isFloating())
-        Desktop::windowState()->raise(WINDOW);
-
-    m_pressed = CONTROL;
-    if (CONTROL) {
-        m_lastPressValid = false;
-        return true;
-    }
-
-    const auto BAR   = barBoxGlobal();
-    const auto LOCAL = global - BAR.pos();
-    if (LOCAL.y < RESIZE_GRAB && WINDOW->isFloating()) {
-        const auto EDGE = LOCAL.x < RESIZE_CORNER ? Desktop::View::eBackendResizeEdge::BACKEND_RESIZE_EDGE_TOP_LEFT :
-            LOCAL.x > BAR.w - RESIZE_CORNER       ? Desktop::View::eBackendResizeEdge::BACKEND_RESIZE_EDGE_TOP_RIGHT :
-                                                    Desktop::View::eBackendResizeEdge::BACKEND_RESIZE_EDGE_TOP;
-        WINDOW->onResizeRequest(EDGE);
-        return true;
-    }
-
-    const bool DOUBLE = m_lastPressValid && e.timeMs - m_lastPressMs <= DOUBLE_CLICK_MS && m_lastPressPos.distance(global) <= DOUBLE_CLICK_DISTANCE;
-    m_lastPressValid  = !DOUBLE;
-    m_lastPressMs     = e.timeMs;
-    m_lastPressPos    = global;
-
-    if (DOUBLE) {
-        if (offers(WINDOW, CONTROL_MAXIMIZE))
-            activate(CONTROL_MAXIMIZE);
-        return true;
-    }
-
-    WINDOW->onMoveRequest();
     return true;
+}
+
+bool CHyprTitleBarDecoration::moveTouchContact(Contact contact, const Vector2D& normalizedPos) {
+    const auto IT = s_contacts.find(contact);
+    if (IT == s_contacts.end())
+        return false;
+
+    if (const auto MONITOR = IT->second.monitor.lock())
+        moveContact(contact, MONITOR->m_position + normalizedPos * MONITOR->m_size);
+    return true;
+}
+
+bool CHyprTitleBarDecoration::moveContact(Contact contact, const Vector2D& pos) {
+    const auto IT = s_contacts.find(contact);
+    if (IT == s_contacts.end())
+        return false;
+
+    auto&      grab = IT->second;
+    const auto BAR  = grab.owner.lock();
+    grab.pos        = pos;
+    if (!BAR || !BAR->shown() || !validMapped(BAR->owningWindow()) || BAR->owningWindow()->isHidden() || g_pSessionLockManager->isSessionLocked()) {
+        grab.moved = true;
+        if (s_dragContact == contact)
+            g_layoutManager->endDragTarget();
+        return true;
+    }
+
+    auto* const DRAG = g_layoutManager->dragController().get();
+    if (s_dragContact == contact) {
+        DRAG->mouseMove(pos);
+        return true;
+    }
+
+    static auto  PTHRESHOLD = CConfigValue<Config::INTEGER>("binds:drag_threshold");
+    const double THRESHOLD  = *PTHRESHOLD > 0 ? *PTHRESHOLD : DEFAULT_DRAG_THRESHOLD;
+    if (!grab.primary || grab.control || grab.moved || grab.start.distanceSq(pos) <= THRESHOLD * THRESHOLD)
+        return true;
+
+    grab.moved = true;
+    BAR->m_lastTap.reset();
+    const auto WINDOW = BAR->owningWindow();
+    if (!validMapped(WINDOW) || WINDOW->isHidden() || DRAG->target() || WINDOW->m_ruleApplicator->noXdgDrags().valueOrDefault())
+        return true;
+
+    const auto                         BOX   = BAR->barBoxGlobal();
+    const auto                         LOCAL = grab.start - BOX.pos();
+    std::optional<Layout::eRectCorner> edge;
+    if (LOCAL.y < RESIZE_GRAB && WINDOW->isFloating() && !Fullscreen::controller()->isFullscreen(WINDOW))
+        edge = LOCAL.x < RESIZE_CORNER ? Layout::CORNER_TOPLEFT : LOCAL.x > BOX.w - RESIZE_CORNER ? Layout::CORNER_TOPRIGHT : Layout::CORNER_TOP;
+
+    const auto START = Fullscreen::controller()->isFullscreen(WINDOW) || !WINDOW->isFloating() ? pos : grab.start;
+    DRAG->dragBegin(WINDOW->layoutTarget(), edge ? MBIND_RESIZE : MBIND_MOVE, edge, true, START);
+    if (DRAG->target() == WINDOW->layoutTarget()) {
+        s_dragContact = contact;
+        s_dragEnded   = DRAG->m_events.ended.listen([] { s_dragContact.reset(); });
+        DRAG->mouseMove(pos);
+    }
+    return true;
+}
+
+bool CHyprTitleBarDecoration::endContact(Contact contact, std::optional<Vector2D> pos, uint32_t time, bool cancelled) {
+    auto entry = s_contacts.extract(contact);
+    if (entry.empty())
+        return false;
+
+    if (s_dragContact == contact)
+        g_layoutManager->endDragTarget();
+
+    const auto& GRAB = entry.mapped();
+    const auto  BAR  = GRAB.owner.lock();
+    if (!BAR || !GRAB.primary || GRAB.moved)
+        return true;
+
+    if (cancelled || g_pSessionLockManager->isSessionLocked() || !BAR->acceptsInputAt(pos.value_or(GRAB.pos))) {
+        BAR->m_lastTap.reset();
+        return true;
+    }
+
+    const auto RELEASE = pos.value_or(GRAB.pos);
+    const auto CONTROL = BAR->controlAt(RELEASE);
+    if (GRAB.control || CONTROL) {
+        BAR->m_lastTap.reset();
+        if (GRAB.control && GRAB.control == CONTROL && offers(BAR->owningWindow(), *CONTROL))
+            BAR->activate(*CONTROL);
+        return true;
+    }
+
+    const auto PREVIOUS = std::exchange(BAR->m_lastTap, std::nullopt);
+    if (GRAB.start.distance(RELEASE) > DOUBLE_CLICK_DISTANCE)
+        return true;
+    if (PREVIOUS && PREVIOUS->device == contact.first && time - PREVIOUS->time <= DOUBLE_CLICK_MS && PREVIOUS->pos.distance(RELEASE) <= DOUBLE_CLICK_DISTANCE) {
+        if (offers(BAR->owningWindow(), CONTROL_MAXIMIZE))
+            BAR->activate(CONTROL_MAXIMIZE);
+    } else
+        BAR->m_lastTap = STap{contact.first, time, RELEASE};
+    return true;
+}
+
+void CHyprTitleBarDecoration::cancelContacts(const IHID* device) {
+    if (s_dragContact && s_dragContact->first == device)
+        g_layoutManager->endDragTarget();
+    std::erase_if(s_contacts, [device](const auto& item) {
+        if (item.first.first != device)
+            return false;
+        if (const auto BAR = item.second.owner.lock())
+            BAR->m_lastTap.reset();
+        return true;
+    });
+}
+
+bool CHyprTitleBarDecoration::ownsContact(Contact contact) {
+    return s_contacts.contains(contact);
+}
+
+bool CHyprTitleBarDecoration::dragging() {
+    return s_dragContact.has_value();
 }
 
 void CHyprTitleBarDecoration::activate(eControl control) {

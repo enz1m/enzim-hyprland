@@ -8,6 +8,7 @@
 #include <print>
 #include <string>
 #include <sys/mman.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include <wayland-client.h>
@@ -33,6 +34,7 @@ struct SState {
     CSharedPointer<CCWlRegistry>               registry;
     CSharedPointer<CCWlCompositor>             compositor;
     CSharedPointer<CCWlShm>                    shm;
+    CSharedPointer<CCWlSeat>                   seat;
     CSharedPointer<CCXdgWmBase>                xdgWm;
     CSharedPointer<CCZxdgDecorationManagerV1>  decorationManager;
 
@@ -50,6 +52,7 @@ struct SState {
 
     eDecorationRequest                         request    = eDecorationRequest::NONE;
     bool                                       shouldExit = false;
+    bool                                       holdCommit = false;
 };
 
 static void clientLog(const std::string& message) {
@@ -58,7 +61,7 @@ static void clientLog(const std::string& message) {
 }
 
 static std::optional<eDecorationRequest> parseRequest(int argc, char** argv) {
-    if (argc != 2)
+    if (argc < 2 || argc > 3)
         return std::nullopt;
 
     const std::string ARG = argv[1];
@@ -82,15 +85,19 @@ static bool bindGlobals(SState& state) {
                 makeShared<CCWlCompositor>(rc<wl_proxy*>(wl_registry_bind(rc<wl_registry*>(registry->resource()), id, &wl_compositor_interface, std::min(version, 6U))));
         else if (INTERFACE == "wl_shm")
             state.shm = makeShared<CCWlShm>(rc<wl_proxy*>(wl_registry_bind(rc<wl_registry*>(registry->resource()), id, &wl_shm_interface, 1)));
+        else if (INTERFACE == "wl_seat")
+            state.seat = makeShared<CCWlSeat>(rc<wl_proxy*>(wl_registry_bind(rc<wl_registry*>(registry->resource()), id, &wl_seat_interface, 1)));
         else if (INTERFACE == "xdg_wm_base")
             state.xdgWm = makeShared<CCXdgWmBase>(rc<wl_proxy*>(wl_registry_bind(rc<wl_registry*>(registry->resource()), id, &xdg_wm_base_interface, 1)));
         else if (INTERFACE == "zxdg_decoration_manager_v1")
-            state.decorationManager =
-                makeShared<CCZxdgDecorationManagerV1>(rc<wl_proxy*>(wl_registry_bind(rc<wl_registry*>(registry->resource()), id, &zxdg_decoration_manager_v1_interface, 1)));
+            state.decorationManager = makeShared<CCZxdgDecorationManagerV1>(
+                rc<wl_proxy*>(wl_registry_bind(rc<wl_registry*>(registry->resource()), id, &zxdg_decoration_manager_v1_interface, std::min(version, 2U))));
     });
     state.registry->setGlobalRemove([](CCWlRegistry*, uint32_t) {});
 
     wl_display_roundtrip(state.display);
+    if (state.seat)
+        state.seat->setCapabilities([](CCWlSeat*, uint32_t) {});
     return state.compositor && state.shm && state.xdgWm && state.decorationManager;
 }
 
@@ -140,6 +147,16 @@ static bool createBuffer(SState& state) {
     return state.shmBuffer && state.shmBuffer->resource();
 }
 
+static bool createDecoration(SState& state) {
+    state.decoration = makeShared<CCZxdgToplevelDecorationV1>(state.decorationManager->sendGetToplevelDecoration(state.toplevel->resource()));
+    if (!state.decoration->resource())
+        return false;
+
+    state.decoration->setConfigure(
+        [](CCZxdgToplevelDecorationV1*, zxdgToplevelDecorationV1Mode mode) { clientLog(mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE ? "mode: server" : "mode: client"); });
+    return true;
+}
+
 static bool setupSurface(SState& state) {
     state.shm->setFormat([&state](CCWlShm*, uint32_t format) {
         if (format == WL_SHM_FORMAT_XRGB8888)
@@ -170,6 +187,8 @@ static bool setupSurface(SState& state) {
         }
 
         state.xdgSurface->sendAckConfigure(serial);
+        if (state.holdCommit)
+            return;
 
         state.xdgSurface->sendSetWindowGeometry(0, 0, state.geometry.x, state.geometry.y);
         state.surface->sendAttach(state.shmBuffer.get(), 0, 0);
@@ -180,13 +199,8 @@ static bool setupSurface(SState& state) {
     state.toplevel->sendSetAppId("xdg-decoration");
 
     if (state.request != eDecorationRequest::NONE) {
-        state.decoration = makeShared<CCZxdgToplevelDecorationV1>(state.decorationManager->sendGetToplevelDecoration(state.toplevel->resource()));
-        if (!state.decoration->resource())
+        if (!createDecoration(state))
             return false;
-
-        state.decoration->setConfigure([](CCZxdgToplevelDecorationV1*, zxdgToplevelDecorationV1Mode mode) {
-            clientLog(mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE ? "mode: server" : "mode: client");
-        });
         state.decoration->sendSetMode(state.request == eDecorationRequest::SERVER_SIDE ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE :
                                                                                          ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
     }
@@ -210,6 +224,7 @@ static void disconnect(SState& state) {
     state.decorationManager.reset();
     state.xdgWm.reset();
     state.shm.reset();
+    state.seat.reset();
     state.compositor.reset();
     state.registry.reset();
 
@@ -221,10 +236,41 @@ static void disconnect(SState& state) {
     wl_display_disconnect(DISPLAY);
 }
 
+static void runInteractive(SState& state) {
+    pollfd fds[] = {{.fd = wl_display_get_fd(state.display), .events = POLLIN}, {.fd = STDIN_FILENO, .events = POLLIN}};
+    while (!state.shouldExit && wl_display_flush(state.display) >= 0 && poll(fds, 2, -1) > 0) {
+        if (fds[0].revents && wl_display_dispatch(state.display) == -1)
+            return;
+        if (!fds[1].revents)
+            continue;
+
+        char command = 0;
+        if (read(STDIN_FILENO, &command, 1) != 1)
+            return;
+
+        if (command == 'n') {
+            state.holdCommit = true;
+            if (!createDecoration(state))
+                return;
+        } else if (command == 'd') {
+            state.holdCommit = true;
+            state.decoration->sendDestroy();
+            state.decoration.reset();
+        } else if (command == 'c') {
+            state.holdCommit = false;
+            state.surface->sendCommit();
+        }
+
+        if (wl_display_roundtrip(state.display) == -1)
+            return;
+        clientLog(std::format("processed: {}", command));
+    }
+}
+
 int main(int argc, char** argv) {
     const auto REQUEST = parseRequest(argc, argv);
     if (!REQUEST) {
-        clientLog("usage: xdg-decoration <none|client|server>");
+        clientLog("usage: xdg-decoration <none|client|server> [--interactive]");
         return 1;
     }
 
@@ -242,9 +288,12 @@ int main(int argc, char** argv) {
     }
 
     wl_display_flush(state.display);
-    while (!state.shouldExit && wl_display_dispatch(state.display) != -1) {
-        ;
-    }
+    if (argc == 3 && std::string_view(argv[2]) == "--interactive")
+        runInteractive(state);
+    else
+        while (!state.shouldExit && wl_display_dispatch(state.display) != -1) {
+            ;
+        }
 
     disconnect(state);
     return 0;

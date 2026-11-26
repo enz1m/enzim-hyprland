@@ -1,4 +1,5 @@
 #include "InputManager.hpp"
+#include <linux/input-event-codes.h>
 #include "../../desktop/view/window/WindowPresentation.hpp"
 #include "../../render/decorations/CHyprTitleBarDecoration.hpp"
 #include "../../Compositor.hpp"
@@ -153,13 +154,14 @@ void CInputManager::onMouseMoved(IPointer::SMotionEvent e) {
 
     // an interactive move or resize is an exclusive grab, so don't feed relative motion to the window being
     // dragged. a pointer-locked game would otherwise pan its camera from the drag itself.
-    if (!g_layoutManager->dragController()->target())
+    if (!CHyprTitleBarDecoration::ownsContact({e.device.get(), BTN_LEFT}) && !g_layoutManager->dragController()->target())
         PROTO::relativePointer->sendRelativeMotion(sc<uint64_t>(e.timeMs) * 1000, delta, unaccel);
     Pointer::mgr()->move(DELTA);
 
     if (PROTO::inputCapture->isCaptured())
         return;
 
+    CHyprTitleBarDecoration::moveContact({e.device.get(), BTN_LEFT}, getMouseCoordsInternal());
     mouseMoveUnified(e.timeMs, false, e.mouse);
 
     m_lastCursorMovement.reset();
@@ -179,6 +181,7 @@ void CInputManager::onMouseWarp(IPointer::SMotionAbsoluteEvent e) {
 
     Pointer::mgr()->warpAbsolute(e.absolute, e.device, e.output);
 
+    CHyprTitleBarDecoration::moveContact({e.device.get(), BTN_LEFT}, getMouseCoordsInternal());
     mouseMoveUnified(e.timeMs, false, e.mouse);
 
     m_lastCursorMovement.reset();
@@ -453,7 +456,8 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus, bool mouse, st
         }
     }
 
-    g_layoutManager->moveMouse(getMouseCoordsInternal());
+    if (!CHyprTitleBarDecoration::dragging())
+        g_layoutManager->moveMouse(getMouseCoordsInternal());
 
     if (g_layoutManager->dragController()->exclusiveDeviceGrab()) {
         g_pSeatManager->setPointerFocus(nullptr, {});
@@ -749,8 +753,11 @@ void CInputManager::onMouseButton(IPointer::SButtonEvent e, SP<IPointer> mouse) 
 
     Event::SCallbackInfo info;
     Event::bus()->m_events.input.mouse.button.emit(e, info);
-    if (info.cancelled)
+    if (info.cancelled) {
+        if (e.state == WL_POINTER_BUTTON_STATE_RELEASED)
+            CHyprTitleBarDecoration::endContact({mouse.get(), e.button}, std::nullopt, e.timeMs, true);
         return;
+    }
 
     if (e.mouse)
         recheckMouseWarpOnMouseInput();
@@ -759,8 +766,10 @@ void CInputManager::onMouseButton(IPointer::SButtonEvent e, SP<IPointer> mouse) 
 
     if (PROTO::inputCapture->isCaptured()) {
         Keybinds::mgr()->onMouseEvent(e, mouse, true);
-        if (e.state == WL_POINTER_BUTTON_STATE_RELEASED)
+        if (e.state == WL_POINTER_BUTTON_STATE_RELEASED) {
+            CHyprTitleBarDecoration::endContact({mouse.get(), e.button}, std::nullopt, e.timeMs, true);
             std::erase_if(m_currentlyHeldButtons, [&](const auto& held) { return held.button == e.button && held.pointer.lock() == mouse; });
+        }
         return;
     }
 
@@ -867,8 +876,8 @@ void CInputManager::setClickMode(eClickBehaviorMode mode) {
 }
 
 void CInputManager::processMouseDownNormal(const IPointer::SButtonEvent& e, SP<IPointer> mouse) {
-    if (e.state == WL_POINTER_BUTTON_STATE_PRESSED)
-        CHyprTitleBarDecoration::notePress();
+    const auto mouseCoords = getMouseCoordsInternal();
+    const bool BAR_RELEASE = e.state == WL_POINTER_BUTTON_STATE_RELEASED && CHyprTitleBarDecoration::endContact({mouse.get(), e.button}, mouseCoords, e.timeMs);
 
     // notify the keybind manager
     static auto PPASSMOUSE        = CConfigValue<Config::INTEGER>("binds:pass_mouse_when_bound");
@@ -879,14 +888,17 @@ void CInputManager::processMouseDownNormal(const IPointer::SButtonEvent& e, SP<I
     static auto PBORDERGRABEXTEND = CConfigValue<Config::INTEGER>("general:extend_border_grab_area");
     const auto  BORDER_GRAB_AREA  = *PRESIZEONBORDER ? *PBORDERSIZE + *PBORDERGRABEXTEND : 0;
 
-    if (!PASS && !*PPASSMOUSE)
+    if (BAR_RELEASE || (!PASS && !*PPASSMOUSE))
         return;
 
-    const auto mouseCoords = g_pInputManager->getMouseCoordsInternal();
-    const auto w           = Desktop::viewState()->hitTest().windowAt(mouseCoords, Desktop::View::ALLOW_FLOATING | Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS);
+    const auto w = Desktop::viewState()->hitTest().windowAt(mouseCoords, Desktop::View::ALLOW_FLOATING | Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS);
 
-    if (w && !m_lastFocusOnLS && !g_pSessionLockManager->isSessionLocked() && w->presentation().checkInputOnDecorations(INPUT_TYPE_BUTTON, mouseCoords, e))
-        return;
+    if (w && !m_lastFocusOnLS && !g_pSessionLockManager->isSessionLocked()) {
+        if (e.state == WL_POINTER_BUTTON_STATE_PRESSED && CHyprTitleBarDecoration::beginContact({mouse.get(), e.button}, w, mouseCoords, e.timeMs, e.button == BTN_LEFT))
+            return;
+        if (w->presentation().checkInputOnDecorations(INPUT_TYPE_BUTTON, mouseCoords, e))
+            return;
+    }
 
     // clicking on border triggers resize
     // TODO detect click on LS properly
@@ -1587,7 +1599,9 @@ void CInputManager::destroyPointer(SP<IPointer> mouse) {
             continue;
         }
 
-        g_pSeatManager->sendPointerButton(Time::millis(Time::steadyNow()), it->button, WL_POINTER_BUTTON_STATE_RELEASED);
+        const auto TIME = Time::millis(Time::steadyNow());
+        if (!CHyprTitleBarDecoration::endContact({mouse.get(), it->button}, std::nullopt, TIME, true))
+            g_pSeatManager->sendPointerButton(TIME, it->button, WL_POINTER_BUTTON_STATE_RELEASED);
         it = m_currentlyHeldButtons.erase(it);
     }
     std::erase_if(m_pointers, [mouse](const auto& other) { return other == mouse; });
@@ -1601,6 +1615,7 @@ void CInputManager::destroyPointer(SP<IPointer> mouse) {
 }
 
 void CInputManager::destroyTouchDevice(SP<ITouch> touch) {
+    CHyprTitleBarDecoration::cancelContacts(touch.get());
     LOG(Log::DEBUG, "Touch device at {:x} removed", rc<uintptr_t>(touch.get()));
 
     std::erase_if(m_touches, [touch](const auto& other) { return other == touch; });
@@ -1617,6 +1632,7 @@ void CInputManager::destroyTablet(SP<CTablet> tablet) {
 }
 
 void CInputManager::destroyTabletTool(SP<CTabletTool> tool) {
+    CHyprTitleBarDecoration::cancelContacts(tool.get());
     LOG(Log::DEBUG, "Tablet tool at {:x} removed", rc<uintptr_t>(tool.get()));
 
     std::erase_if(m_tabletTools, [tool](const auto& other) { return other == tool; });
@@ -2244,7 +2260,9 @@ void CInputManager::releaseAllMouseButtons() {
         return;
 
     for (auto const& mb : buttonsCopy) {
-        g_pSeatManager->sendPointerButton(Time::millis(Time::steadyNow()), mb.button, WL_POINTER_BUTTON_STATE_RELEASED);
+        const auto TIME = Time::millis(Time::steadyNow());
+        if (!CHyprTitleBarDecoration::endContact({mb.pointer.lock().get(), mb.button}, std::nullopt, TIME, true))
+            g_pSeatManager->sendPointerButton(TIME, mb.button, WL_POINTER_BUTTON_STATE_RELEASED);
     }
 
     m_currentlyHeldButtons.clear();
