@@ -2,6 +2,7 @@
 
 #include "XWayland.hpp"
 #include "../defines.hpp"
+#include "../Compositor.hpp"
 #include "XDataSource.hpp"
 
 #include <fcntl.h>
@@ -49,18 +50,11 @@ std::vector<std::string> CXDataSource::mimes() {
 }
 
 void CXDataSource::send(const std::string& mime, CFileDescriptor fd) {
-    xcb_atom_t mimeAtom = 0;
-
-    if (mime == "text/plain")
-        mimeAtom = HYPRATOMS["TEXT"];
-    else if (mime == "text/plain;charset=utf-8")
-        mimeAtom = HYPRATOMS["UTF8_STRING"];
-    else {
-        for (size_t i = 0; i < m_mimeTypes.size(); ++i) {
-            if (m_mimeTypes[i] == mime) {
-                mimeAtom = m_mimeAtoms[i];
-                break;
-            }
+    xcb_atom_t mimeAtom = XCB_ATOM_NONE;
+    for (size_t i = 0; i < m_mimeTypes.size(); ++i) {
+        if (m_mimeTypes[i] == mime) {
+            mimeAtom = m_mimeAtoms[i];
+            break;
         }
     }
 
@@ -71,7 +65,26 @@ void CXDataSource::send(const std::string& mime, CFileDescriptor fd) {
 
     LOG(Log::DEBUG, "[XDataSource] send with mime {} to fd {}", mime, fd.get());
 
-    auto transfer            = makeUnique<SXTransfer>(m_selection);
+    const auto flags = fcntl(fd.get(), F_GETFL);
+    if (flags == -1 || fcntl(fd.get(), F_SETFL, flags | O_NONBLOCK) == -1)
+        return;
+
+    auto transfer         = makeUnique<SXTransfer>(m_selection);
+    transfer->wlFD        = std::move(fd);
+    transfer->eventSource = wl_event_loop_add_fd(
+        g_pCompositor->m_wlEventLoop, transfer->wlFD.get(), 0,
+        [](int, uint32_t mask, void* data) {
+            auto* transfer = sc<SXTransfer*>(data);
+            if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
+                transfer->selection.removeTransfer(transfer->incomingWindow);
+            else if (mask & WL_EVENT_WRITABLE)
+                transfer->writeToWayland();
+            return 0;
+        },
+        transfer.get());
+    if (!transfer->eventSource)
+        return;
+
     transfer->incomingWindow = xcb_generate_id(g_pXWayland->m_wm->getConnection());
     const uint32_t MASK      = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY | XCB_EVENT_MASK_PROPERTY_CHANGE;
     xcb_create_window(g_pXWayland->m_wm->getConnection(), XCB_COPY_FROM_PARENT, transfer->incomingWindow, g_pXWayland->m_wm->m_screen->root, 0, 0, 10, 10, 0,
@@ -87,9 +100,6 @@ void CXDataSource::send(const std::string& mime, CFileDescriptor fd) {
 
     xcb_flush(g_pXWayland->m_wm->getConnection());
 
-    //TODO: make CFileDescriptor setflags take SETFL as well
-    fcntl(fd.get(), F_SETFL, O_WRONLY | O_NONBLOCK);
-    transfer->wlFD = std::move(fd);
     m_selection.transfers.emplace_back(std::move(transfer));
 }
 
