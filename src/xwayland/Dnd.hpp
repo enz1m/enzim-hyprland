@@ -12,6 +12,7 @@
 #define XDND_VERSION 5
 
 class CXWaylandSurface;
+class CEventLoopTimer;
 
 class CX11DataOffer : public IDataOffer {
   public:
@@ -22,11 +23,9 @@ class CX11DataOffer : public IDataOffer {
     virtual SP<CWLDataOfferResource> getWayland();
     virtual SP<CX11DataOffer>        getX11();
     virtual SP<IDataSource>          getSource();
-    virtual void                     markDead();
 
     WP<IDataSource>                  m_source;
     WP<CX11DataOffer>                m_self;
-    WP<CXWaylandSurface>             m_xwaylandSurface;
 };
 
 class CX11DataSource : public IDataSource {
@@ -58,6 +57,7 @@ class CX11DataSource : public IDataSource {
 class CX11DataDevice : public IDataDevice {
   public:
     CX11DataDevice() = default;
+    ~CX11DataDevice() override;
 
     virtual SP<CWLDataDeviceResource> getWayland();
     virtual SP<CX11DataDevice>        getX11();
@@ -70,16 +70,29 @@ class CX11DataDevice : public IDataDevice {
     virtual eDataSourceType           type();
     void                              forceCleanupDnd();
 
+#ifndef NO_XWAYLAND
+    SP<IDataSource> dragSource() const;
+    bool            canDrop() const;
+    bool            allowsSelectionRequest(xcb_window_t window) const;
+    void            handleReply(const xcb_client_message_event_t& event);
+#endif
+
     WP<CX11DataDevice>                m_self;
 
   private:
     void cleanupState();
 #ifndef NO_XWAYLAND
+    void                              finishDrop(bool success);
     xcb_window_t getProxyWindow(xcb_window_t window);
-    void         sendDndEvent(xcb_window_t targetWindow, xcb_atom_t type, xcb_client_message_data_t& data);
+    void                              sendDndEvent(xcb_atom_t type, xcb_client_message_data_t& data);
+    xcb_window_t                      m_target  = XCB_WINDOW_NONE;
+    xcb_window_t                      m_proxy   = XCB_WINDOW_NONE;
+    uint32_t                          m_version = 0;
+    wl_data_device_manager_dnd_action m_action  = WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+    SP<CEventLoopTimer>               m_dropTimeout;
 #endif
     WP<CXWaylandSurface> m_lastSurface;
-    WP<IDataOffer>       m_lastOffer;
+    SP<IDataOffer>       m_lastOffer;
     Vector2D             m_lastSurfaceCoords;
     uint32_t             m_lastTime = 0;
 };

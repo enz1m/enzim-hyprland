@@ -410,6 +410,11 @@ void CXWM::handlePropertyNotify(xcb_property_notify_event_t* e) {
 }
 
 void CXWM::handleClientMessage(xcb_client_message_event_t* e) {
+    if (e->window == m_dndSelection.window && (e->type == HYPRATOMS["XdndStatus"] || e->type == HYPRATOMS["XdndFinished"])) {
+        m_dndDataDevice->handleReply(*e);
+        return;
+    }
+
     const auto XSURF = windowForXID(e->window);
 
     if (!XSURF)
@@ -504,28 +509,6 @@ void CXWM::handleClientMessage(xcb_client_message_event_t* e) {
         XSURF->m_events.stateChanged.emit();
     } else if (e->type == HYPRATOMS["_NET_ACTIVE_WINDOW"]) {
         XSURF->m_events.activate.emit();
-    } else if (e->type == HYPRATOMS["XdndStatus"]) {
-        if (m_dndDataOffers.empty() || !m_dndDataOffers.at(0)->getSource()) {
-            LOG(Log::TRACE, "[xwm] Rejecting XdndStatus message: nothing to get");
-            return;
-        }
-
-        xcb_client_message_data_t* data     = &e->data;
-        const bool                 ACCEPTED = data->data32[1] & 1;
-
-        if (ACCEPTED)
-            m_dndDataOffers.at(0)->getSource()->accepted("");
-
-        LOG(Log::DEBUG, "[xwm] XdndStatus: accepted: {}");
-    } else if (e->type == HYPRATOMS["XdndFinished"]) {
-        if (m_dndDataOffers.empty() || !m_dndDataOffers.at(0)->getSource()) {
-            LOG(Log::TRACE, "[xwm] Rejecting XdndFinished message: nothing to get");
-            return;
-        }
-
-        m_dndDataOffers.at(0)->getSource()->sendDndFinished();
-
-        LOG(Log::DEBUG, "[xwm] XdndFinished");
     } else {
         LOG(Log::TRACE, "[xwm] Unhandled message prop {} -> {}", e->type, propName);
         return;
@@ -776,7 +759,10 @@ void CXWM::handleSelectionRequest(xcb_selection_request_event_t* e) {
         return;
     }
 
-    if (!g_pSeatManager->m_state.keyboardFocusResource || g_pSeatManager->m_state.keyboardFocusResource->client() != g_pXWayland->m_server->m_xwaylandClient) {
+    const bool allowed = sel == &m_dndSelection ?
+        m_dndDataDevice->allowsSelectionRequest(e->requestor) :
+        g_pSeatManager->m_state.keyboardFocusResource && g_pSeatManager->m_state.keyboardFocusResource->client() == g_pXWayland->m_server->m_xwaylandClient;
+    if (!allowed) {
         LOG(Log::TRACE, "[xwm] Ignoring clipboard access: xwayland not in focus");
         selectionSendNotify(e, false);
         return;
@@ -789,8 +775,10 @@ void CXWM::handleSelectionRequest(xcb_selection_request_event_t* e) {
             mimes = g_pSeatManager->m_selection.currentSelection->mimes();
         else if (sel == &m_primarySelection && g_pSeatManager->m_selection.currentPrimarySelection)
             mimes = g_pSeatManager->m_selection.currentPrimarySelection->mimes();
-        else if (sel == &m_dndSelection && !m_dndDataOffers.empty() && m_dndDataOffers.at(0)->m_source)
-            mimes = m_dndDataOffers.at(0)->m_source->mimes();
+        else if (sel == &m_dndSelection) {
+            if (const auto source = m_dndDataDevice->dragSource())
+                mimes = source->mimes();
+        }
 
         if (mimes.empty())
             LOG(Log::WARN, "[xwm] WARNING: No mimes in TARGETS?");
@@ -1421,25 +1409,6 @@ SP<CX11DataDevice> CXWM::getDataDevice() {
     return m_dndDataDevice;
 }
 
-SP<IDataOffer> CXWM::createX11DataOffer(SP<CWLSurfaceResource> surf, SP<IDataSource> source) {
-    auto XSURF = windowForWayland(surf);
-
-    if (!XSURF) {
-        LOG(Log::ERR, "[xwm] No xwayland surface for destination in createX11DataOffer");
-        return nullptr;
-    }
-
-    // invalidate old
-    g_pXWayland->m_wm->m_dndDataOffers.clear();
-
-    auto offer               = m_dndDataOffers.emplace_back(makeShared<CX11DataOffer>());
-    offer->m_self            = offer;
-    offer->m_xwaylandSurface = XSURF;
-    offer->m_source          = source;
-
-    return offer;
-}
-
 void SXSelection::onSelection() {
     const bool isClipboard = this == &g_pXWayland->m_wm->m_clipboard;
     const auto source      = isClipboard ? g_pSeatManager->m_selection.currentSelection.lock() : g_pSeatManager->m_selection.currentPrimarySelection.lock();
@@ -1538,8 +1507,8 @@ bool SXSelection::sendData(xcb_selection_request_event_t* e, std::string mime) {
         selection = g_pSeatManager->m_selection.currentSelection;
     else if (this == &g_pXWayland->m_wm->m_primarySelection)
         selection = g_pSeatManager->m_selection.currentPrimarySelection;
-    else if (!g_pXWayland->m_wm->m_dndDataOffers.empty())
-        selection = g_pXWayland->m_wm->m_dndDataOffers.at(0)->getSource();
+    else
+        selection = g_pXWayland->m_wm->getDataDevice()->dragSource();
 
     if (!selection) {
         LOG(Log::ERR, "[xwm] sendData: no selection source available");
