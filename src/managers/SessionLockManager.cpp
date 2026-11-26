@@ -154,13 +154,10 @@ WP<SSessionLockSurface> CSessionLockManager::getSessionLockSurfaceForMonitor(uin
     if (!m_sessionLock)
         return {};
 
-    for (auto const& sls : m_sessionLock->vSessionLockSurfaces) {
-        if (sls->iMonitorID == id) {
-            if (sls->mapped)
-                return sls;
-            else
-                return {};
-        }
+    for (const auto& sls : m_sessionLock->vSessionLockSurfaces) {
+        const auto MONITOR = sls->surface->monitor();
+        if (sls->iMonitorID == id && sls->mapped && sls->surface->surface() && MONITOR && MONITOR->m_enabled)
+            return sls;
     }
 
     return {};
@@ -204,7 +201,10 @@ void CSessionLockManager::removeSessionLockSurface(SSessionLockSurface* pSLS) {
     if (!m_sessionLock)
         return;
 
+    const auto MONITOR = pSLS->surface->monitor();
     std::erase_if(m_sessionLock->vSessionLockSurfaces, [&](const auto& other) { return pSLS == other.get(); });
+    if (MONITOR && MONITOR->m_enabled)
+        g_pHyprRenderer->damageMonitor(MONITOR);
 
     if (Desktop::focusState()->surface())
         return;
