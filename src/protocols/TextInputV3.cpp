@@ -78,6 +78,10 @@ void CTextInputV3::enter(SP<CWLSurfaceResource> surf) {
 }
 
 void CTextInputV3::leave(SP<CWLSurfaceResource> surf) {
+    m_current.surrounding.updated = false;
+    m_pending.surrounding.updated = false;
+    m_current.box.updated         = false;
+    m_pending.box.updated         = false;
     m_resource->sendLeave(surf->getResource()->resource());
     m_pending = {};
     m_current = {};

@@ -32,6 +32,7 @@ class CTextInput {
     void                   onCommit();
     void                   onReset();
 
+    SP<CTextInputV3>       writingInput();
     bool                   isEnabled();
     bool                   hasCursorRectangle();
     CBox                   cursorBox();

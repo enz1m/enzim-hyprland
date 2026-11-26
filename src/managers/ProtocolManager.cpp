@@ -429,7 +429,9 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 // Compositor control requests and dev.enzui.* application ids need the same
 // kind of identity: see controlAllowed and enzuiAdmitAppId.
 #include "SessionLockManager.hpp"
+#include "SeatManager.hpp"
 #include "input/InputManager.hpp"
+#include "../desktop/state/FocusState.hpp"
 #include "../ipc/s1/S1.hpp"
 #include <sys/stat.h>
 #include <dirent.h>
@@ -440,6 +442,7 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 #include <unordered_map>
 #include <array>
 #include <charconv>
+#include <optional>
 #include <utility>
 #include <fcntl.h>
 #include <poll.h>
@@ -934,6 +937,135 @@ namespace EnzuiAdmission {
         return allowed && unchanged(owner, proc);
     }
 
+    static constexpr size_t WRITING_SELECTION_LIMIT = 4096;
+    static constexpr size_t WRITING_RESULT_LIMIT    = 8192;
+
+    struct SWritingSelection {
+        WP<CWLSurfaceResource> surface;
+        WP<CTextInputV3>       input;
+        WP<IDataSource>        primary;
+        std::string            surrounding;
+        std::optional<CBox>    cursorBox;
+        uint32_t               cursor = 0;
+        uint32_t               anchor = 0;
+        uint64_t               token  = 0;
+    };
+
+    static SWritingSelection writingSelection;
+    static uint64_t          writingToken = 0;
+
+    static bool              privateField(const SP<CTextInputV3>& input) {
+        if (!input)
+            return false;
+        const auto& type = input->m_current.contentType;
+        return (type.hint & (ZWP_TEXT_INPUT_V3_CONTENT_HINT_HIDDEN_TEXT | ZWP_TEXT_INPUT_V3_CONTENT_HINT_SENSITIVE_DATA)) ||
+            type.purpose == ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PASSWORD || type.purpose == ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PIN;
+    }
+
+    static wl_client* primaryOwner(const SP<IDataSource>& source) {
+        if (const auto primary = dynamic_cast<CPrimarySelectionSource*>(source.get()); primary && primary->m_device)
+            return primary->m_device->client();
+        if (const auto ext = dynamic_cast<CExtDataSource*>(source.get()); ext && ext->m_device)
+            return ext->m_device->client();
+        if (const auto wlr = dynamic_cast<CWLRDataSource*>(source.get()); wlr && wlr->m_device)
+            return wlr->m_device->client();
+        return nullptr;
+    }
+
+    static std::optional<CBox> cursorBox(const SP<CTextInputV3>& input) {
+        const auto& box = input->m_current.box;
+        return box.updated ? std::optional<CBox>{box.cursorBox} : std::nullopt;
+    }
+
+    static std::string writingCommand(std::string_view action, std::string_view args) {
+        if (!g_pInputManager || !g_pInputManager->m_relay.imeAllowed()) {
+            writingSelection = {};
+            return "error: locked session";
+        }
+        const auto surface = Desktop::focusState()->surface();
+        const auto field   = g_pInputManager->m_relay.getFocusedTextInput();
+        const auto input   = field ? field->writingInput() : SP<CTextInputV3>{};
+        if (action == "capture") {
+            writingSelection = {};
+            if (!surface || privateField(input))
+                return "empty";
+            if (input) {
+                const auto& text  = input->m_current.surrounding;
+                const auto  begin = std::min(text.cursor, text.anchor);
+                const auto  end   = std::max(text.cursor, text.anchor);
+                if (text.updated && end <= text.text.size() && begin < end && text.text.size() <= WRITING_SELECTION_LIMIT) {
+                    const auto token = ++writingToken;
+                    auto       reply = std::format("selection {}\n{}", token, text.text.substr(begin, end - begin));
+                    writingSelection = {surface, input, {}, text.text, cursorBox(input), text.cursor, text.anchor, token};
+                    return reply;
+                }
+            }
+            const auto source = g_pSeatManager->m_selection.currentPrimarySelection.lock();
+            if (primaryOwner(source) != surface->client())
+                return "empty";
+            const auto token = ++writingToken;
+            writingSelection = {surface, {}, source, {}, {}, 0, 0, token};
+            return std::format("primary {}", token);
+        }
+
+        const auto split = args.find(' ');
+        uint64_t   token = 0;
+        if (!number(std::string{args.substr(0, split)}, token) || token != writingSelection.token)
+            return "stale";
+        if (action == "cancel") {
+            writingSelection = {};
+            return "ok";
+        }
+        if (!surface || surface != writingSelection.surface.lock() || privateField(input)) {
+            writingSelection = {};
+            return "stale";
+        }
+        if (action == "verify-primary") {
+            const auto source = writingSelection.primary.lock();
+            writingSelection  = {};
+            return source && source == g_pSeatManager->m_selection.currentPrimarySelection.lock() ? "ok" : "stale";
+        }
+        if (action != "replace" || split == std::string_view::npos)
+            return "error: invalid writing request";
+        if (!input || !input->m_current.surrounding.updated)
+            return "pending";
+        const auto  saved = std::exchange(writingSelection, {});
+        const auto& text  = input->m_current.surrounding;
+        if (input != saved.input.lock() || text.cursor != saved.cursor || text.anchor != saved.anchor || text.text != saved.surrounding ||
+            (saved.cursorBox && saved.cursorBox != cursorBox(input)))
+            return "stale";
+        const auto encoded = args.substr(split + 1);
+        if (encoded.empty() || encoded.size() % 2 || encoded.size() > WRITING_RESULT_LIMIT * 2)
+            return "error: invalid replacement";
+        std::string replacement;
+        replacement.reserve(encoded.size() / 2);
+        for (size_t i = 0; i < encoded.size(); i += 2) {
+            unsigned int byte   = 0;
+            const auto   end    = encoded.data() + i + 2;
+            const auto   parsed = std::from_chars(end - 2, end, byte, 16);
+            if (parsed.ec != std::errc{} || parsed.ptr != end || byte == 0)
+                return "error: invalid replacement";
+            replacement += sc<char>(byte);
+        }
+        // Text-input applies the pending commit to the confirmed selection at done.
+        input->commitString(replacement);
+        input->sendDone();
+        return "ok";
+    }
+
+    static std::string writing(const IPC::Socket1::SRequest& request) {
+        SProc proc;
+        if (!controlPeer || request.pid != controlPeer->pid || !readProc(request.pid, proc) || !claimShell(request.pid, proc.start, controlPeer->handle.get()) ||
+            !unchanged(*controlPeer, proc))
+            return "error: not the registered shell";
+        const std::string_view command = request.command;
+        if (!command.starts_with("enzuiwriting "))
+            return "error: invalid writing request";
+        const auto payload = command.substr(sizeof("enzuiwriting ") - 1);
+        const auto split   = payload.find(' ');
+        return writingCommand(payload.substr(0, split), split == std::string_view::npos ? std::string_view{} : payload.substr(split + 1));
+    }
+
     static std::string command(const IPC::Socket1::SRequest& request) {
         const pid_t pid = request.pid;
         SProc       proc;
@@ -1035,6 +1167,7 @@ std::string enzuiAdmitAppId(const wl_client* client, std::string id) {
 void enzuiRevokePrivileged() {
     if (!EnzuiAdmission::enforcing())
         return;
+    EnzuiAdmission::writingSelection = {};
     std::vector<wl_client*> revoked;
     for (const auto& [client, entry] : EnzuiAdmission::admitted) {
         if ((entry->kinds & ~(EnzuiAdmission::KIND_INPUT_METHOD | EnzuiAdmission::KIND_TEXT_COMMIT)) && !EnzuiAdmission::isShell(client))
@@ -1050,6 +1183,11 @@ void enzuiRegisterAdmissionCommand() {
     if (!EnzuiAdmission::enforcing() || !IPC::Socket1::sock())
         return;
     (void)EnzuiAdmission::launcher();
+    IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
+        .name    = "enzuiwriting",
+        .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
+        .handler = [](const IPC::Socket1::SRequest& request) -> IPC::Socket1::SResponse { return EnzuiAdmission::writing(request); },
+    });
     IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
         .name    = "enzuiadmit",
         .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,

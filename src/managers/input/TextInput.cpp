@@ -357,3 +357,7 @@ CBox CTextInput::cursorBox() {
 bool CTextInput::isEnabled() {
     return isV3() ? m_v3Input->m_current.enabled.value : true;
 }
+
+SP<CTextInputV3> CTextInput::writingInput() {
+    return isV3() && isEnabled() && !onLockSurface() ? m_v3Input.lock() : nullptr;
+}
