@@ -12,6 +12,7 @@
 #include "../../protocols/core/Compositor.hpp"
 #include "../../state/MonitorState.hpp"
 #include "RectPassElement.hpp"
+#include "SurfacePassElement.hpp"
 #include "BackdropScopePassElement.hpp"
 #include "macros.hpp"
 
@@ -23,6 +24,29 @@ bool CRenderPass::empty() const {
 
 bool CRenderPass::single() const {
     return m_passElements.size() == 1;
+}
+
+bool CRenderPass::coversWallpaper(PHLMONITOR monitor) {
+    const CBox output = {{}, monitor->m_size};
+    const bool covered = std::ranges::any_of(m_passElements, [&](const auto& el) {
+        if (el.element->type() != EK_SURFACE)
+            return false;
+        auto& surface = *sc<CSurfacePassElement*>(el.element.get());
+        const auto& data = surface.m_data;
+        const auto& window = data.pWindow;
+        if (!data.mainSurface || data.popup || !data.surface || !data.texture || !window || window->m_workspace != monitor->m_activeWorkspace ||
+            !window->m_ruleApplicator->m_tagKeeper.isTagged("enzui-borderless-fullscreen", true))
+            return false;
+        if (data.rounding || !data.clipBox.empty() || surface.getTexBox() != output)
+            return false;
+        const auto view = Desktop::View::CWLSurface::fromResource(data.surface);
+        if (!view || !view->m_visibleRegion.empty() || data.alpha * data.fadeAlpha * view->m_alphaModifier * view->m_overallOpacity != 1.F)
+            return false;
+        return data.texture->m_opaque || CRegion{output}.subtract(surface.opaqueRegion()).empty();
+    });
+
+    // A cached backdrop or live blur can sample layers even when the client covers the output.
+    return covered && !needsPrecomputeBlur() && !needsLiveBlur();
 }
 
 bool CRenderPass::needsLiveBlur() {

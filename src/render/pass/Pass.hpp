@@ -12,6 +12,7 @@ namespace Render {
       public:
         bool    empty() const;
         bool    single() const;
+        bool    coversWallpaper(PHLMONITOR monitor);
         bool    needsLiveBlur();
         bool    needsPrecomputeBlur();
 

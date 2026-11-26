@@ -73,6 +73,7 @@ namespace Monitor {
         Vector2D                    m_transformedSize  = Vector2D(0, 0);
 
         MONITORID                   m_id                     = MONITOR_INVALID;
+        bool                        m_opaqueBorderlessCover = false;
         PHLWORKSPACE                m_activeWorkspace        = nullptr;
         PHLWORKSPACE                m_activeSpecialWorkspace = nullptr;
         float                       m_setScale               = 1; // scale set by cfg

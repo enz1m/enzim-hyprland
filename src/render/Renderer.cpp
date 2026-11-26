@@ -37,6 +37,7 @@
 #include "../i18n/Engine.hpp"
 #include "../desktop/DesktopTypes.hpp"
 #include "../event/EventBus.hpp"
+#include "../ipc/s2/S2.hpp"
 #include "../helpers/CursorShapes.hpp"
 #include "../helpers/MainLoopExecutor.hpp"
 #include "../output/Monitor.hpp"
@@ -2078,6 +2079,13 @@ void IHyprRenderer::renderMirrored() {
     m_renderPass.add(makeUnique<CTexPassElement>(std::move(data)));
 }
 
+static void setWallpaperCoverage(PHLMONITOR monitor, bool covered) {
+    if (monitor->m_opaqueBorderlessCover == covered)
+        return;
+    monitor->m_opaqueBorderlessCover = covered;
+    IPC::Socket2::sock()->postEvent({"enzui-wallpaper-coverage", monitor->m_name});
+}
+
 void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
     if (!pMonitor)
         return;
@@ -2150,6 +2158,7 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
 
     if (canAttemptDirectScanout) {
         handleFullscreenSettings(pMonitor);
+        // Direct scanout hides the wallpaper; keep the last composited coverage.
         if (pMonitor->attemptDirectScanout()) {
             return;
         } else if (!pMonitor->m_lastScanout.expired() || pMonitor->m_directScanoutIsActive)
@@ -2294,6 +2303,9 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
     }
 
     Event::bus()->m_events.render.stage.emit(RENDER_LAST_MOMENT);
+
+    if (!finalDamage.empty())
+        setWallpaperCoverage(pMonitor, !pMonitor->isMirror() && !g_pSessionLockManager->isSessionLocked() && m_renderPass.coversWallpaper(pMonitor));
 
     endRender();
 
