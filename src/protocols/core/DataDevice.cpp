@@ -439,6 +439,9 @@ SP<IDataDevice> CWLDataDeviceProtocol::dataDeviceForClient(wl_client* c) {
 }
 
 void CWLDataDeviceProtocol::sendSelectionToDevice(SP<IDataDevice> dev, SP<IDataSource> sel) {
+    if (dev->type() != DATA_SOURCE_TYPE_WAYLAND)
+        return;
+
     if (!sel) {
         dev->sendSelection(nullptr);
         return;
@@ -457,10 +460,6 @@ void CWLDataDeviceProtocol::sendSelectionToDevice(SP<IDataDevice> dev, SP<IDataS
         OFFER->m_self   = OFFER;
         offer           = OFFER;
     }
-#ifndef NO_XWAYLAND
-    else if (const auto X11 = dev->getX11(); X11)
-        offer = g_pXWayland->m_wm->createX11DataOffer(g_pSeatManager->m_state.keyboardFocus.lock(), sel);
-#endif
 
     if UNLIKELY (!offer) {
         LOG(Log::ERR, "No offer could be created in sendSelectionToDevice");
@@ -669,6 +668,7 @@ void CWLDataDeviceProtocol::updateDrag() {
 
     if (m_dnd.focusedDevice)
         m_dnd.focusedDevice->sendLeave();
+    m_dnd.focusedDevice.reset();
 
     auto surface = g_pSeatManager->m_state.dndPointerFocus.lock();
     if (!surface)
@@ -694,8 +694,12 @@ void CWLDataDeviceProtocol::updateDrag() {
         offer           = OFFER;
     }
 #ifndef NO_XWAYLAND
-    else if (const auto X11 = m_dnd.focusedDevice->getX11(); X11)
-        offer = g_pXWayland->m_wm->createX11DataOffer(g_pSeatManager->m_state.keyboardFocus.lock(), m_dnd.currentSource.lock());
+    else if (m_dnd.focusedDevice->getX11()) {
+        const auto xOffer = makeShared<CX11DataOffer>();
+        xOffer->m_self    = xOffer;
+        xOffer->m_source  = m_dnd.currentSource;
+        offer             = xOffer;
+    }
 #endif
 
     if (!offer) {
@@ -710,6 +714,15 @@ void CWLDataDeviceProtocol::updateDrag() {
     if (const auto WL = offer->getWayland(); WL)
         WL->sendData();
     m_dnd.focusedDevice->sendEnter(wl_display_next_serial(g_pCompositor->m_wlDisplay), surface, surface->m_current.size / 2.F, offer);
+#ifndef NO_XWAYLAND
+    if (const auto x11 = m_dnd.focusedDevice->getX11()) {
+        const auto view = Desktop::View::CWLSurface::fromResource(surface);
+        if (const auto box = view ? view->getSurfaceBoxGlobal() : std::nullopt; box) {
+            const auto point = m_dnd.touchPos.value_or(g_pInputManager->getMouseCoordsInternal());
+            x11->sendMotion(Time::millis(Time::steadyNow()), point - box->pos());
+        }
+    }
+#endif
 }
 
 void CWLDataDeviceProtocol::cleanupDndState(bool resetDevice, bool resetSource, bool simulateInput) {
@@ -750,7 +763,6 @@ void CWLDataDeviceProtocol::dropDrag() {
 
 #ifndef NO_XWAYLAND
     if (m_dnd.focusedDevice->getX11()) {
-        m_dnd.focusedDevice->sendLeave();
         if (m_dnd.overriddenCursor)
             Pointer::Cursor::overrideController->unsetOverride(Pointer::Cursor::CURSOR_OVERRIDE_DND);
         m_dnd.overriddenCursor = false;
@@ -770,6 +782,11 @@ bool CWLDataDeviceProtocol::wasDragSuccessful() {
     if (!m_dnd.currentSource)
         return false;
 
+#ifndef NO_XWAYLAND
+    if (const auto x11 = m_dnd.focusedDevice->getX11())
+        return x11->canDrop();
+#endif
+
     for (auto const& o : m_offers) {
         if (o->m_dead || o->m_source != m_dnd.currentSource)
             continue;
@@ -777,11 +794,6 @@ bool CWLDataDeviceProtocol::wasDragSuccessful() {
         if (o->m_recvd || o->m_accepted)
             return true;
     }
-
-#ifndef NO_XWAYLAND
-    if (m_dnd.focusedDevice->getX11())
-        return true;
-#endif
 
     return false;
 }

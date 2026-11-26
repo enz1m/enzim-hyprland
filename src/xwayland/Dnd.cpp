@@ -3,6 +3,8 @@
 #include "XWM.hpp"
 #include "XWayland.hpp"
 #include "Server.hpp"
+#include "../managers/SessionLockManager.hpp"
+#include "../managers/eventLoop/EventLoopManager.hpp"
 #endif
 #include "../managers/XWaylandManager.hpp"
 #include "../desktop/view/WLSurface.hpp"
@@ -26,17 +28,17 @@ static xcb_atom_t dndActionToAtom(uint32_t actions) {
     return XCB_ATOM_NONE;
 }
 
-void CX11DataDevice::sendDndEvent(xcb_window_t targetWindow, xcb_atom_t type, xcb_client_message_data_t& data) {
+void CX11DataDevice::sendDndEvent(xcb_atom_t type, xcb_client_message_data_t& data) {
     xcb_client_message_event_t event = {
         .response_type = XCB_CLIENT_MESSAGE,
         .format        = 32,
         .sequence      = 0,
-        .window        = targetWindow,
+        .window        = m_target,
         .type          = type,
         .data          = data,
     };
     xcb_connection_t* conn = (g_pXWayland->m_wm->getConnection());
-    xcb_send_event(conn, 0, targetWindow, XCB_EVENT_MASK_NO_EVENT, rc<const char*>(&event));
+    xcb_send_event(conn, 0, m_proxy, XCB_EVENT_MASK_NO_EVENT, rc<const char*>(&event));
     xcb_flush(conn);
 }
 
@@ -70,6 +72,79 @@ xcb_window_t CX11DataDevice::getProxyWindow(xcb_window_t window) {
 
     return targetWindow;
 }
+static wl_data_device_manager_dnd_action atomToDndAction(xcb_atom_t atom) {
+    if (atom == HYPRATOMS["XdndActionCopy"])
+        return WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+    if (atom == HYPRATOMS["XdndActionMove"])
+        return WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+    if (atom == HYPRATOMS["XdndActionAsk"])
+        return WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK;
+    return WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+}
+
+SP<IDataSource> CX11DataDevice::dragSource() const {
+    return m_lastOffer ? m_lastOffer->getSource() : nullptr;
+}
+
+bool CX11DataDevice::canDrop() const {
+    return m_lastSurface && dragSource() && m_action != WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+}
+
+bool CX11DataDevice::allowsSelectionRequest(xcb_window_t window) const {
+    if (!m_lastSurface || !dragSource() || g_pSessionLockManager->isSessionLocked())
+        return false;
+
+    const auto mask = xcb_get_setup(g_pXWayland->m_wm->getConnection())->resource_id_mask;
+    return (window & ~mask) == (m_proxy & ~mask);
+}
+
+void CX11DataDevice::handleReply(const xcb_client_message_event_t& event) {
+    if (event.format != 32 || event.data.data32[0] != m_target || !m_lastOffer)
+        return;
+    const auto source = m_lastOffer->getSource();
+    if (!source)
+        return;
+
+    const bool accepted = event.data.data32[1] & 1;
+    if (event.type == HYPRATOMS["XdndFinished"]) {
+        if (m_dropTimeout) {
+            const auto action = atomToDndAction(event.data.data32[2]);
+            finishDrop(m_version < 5 || (accepted && action == m_action));
+        }
+        return;
+    }
+
+    if (m_dropTimeout)
+        return;
+    const auto proposed = atomToDndAction(event.data.data32[4]);
+    const auto action   = accepted && (source->actions() & proposed) ? proposed : WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+    if (action != m_action) {
+        m_action = action;
+        source->sendDndAction(action);
+    }
+}
+
+static void releaseDndSelection(xcb_connection_t* conn, xcb_window_t sourceWindow) {
+    const auto                                                              atom   = HYPRATOMS["XdndSelection"];
+    const auto                                                              cookie = xcb_get_selection_owner(conn, atom);
+    const std::unique_ptr<xcb_get_selection_owner_reply_t, decltype(&free)> reply(xcb_get_selection_owner_reply(conn, cookie, nullptr), free);
+    if (reply && reply->owner == sourceWindow) {
+        xcb_set_selection_owner(conn, XCB_WINDOW_NONE, atom, XCB_TIME_CURRENT_TIME);
+        xcb_flush(conn);
+    }
+}
+
+void CX11DataDevice::finishDrop(bool success) {
+    const auto source = dragSource();
+    cleanupState();
+    releaseDndSelection(g_pXWayland->m_wm->getConnection(), g_pXWayland->m_wm->m_dndSelection.window);
+    if (source) {
+        if (success)
+            source->sendDndFinished();
+        else
+            source->cancelled();
+    }
+}
 #endif
 
 eDataSourceType CX11DataOffer::type() {
@@ -86,12 +161,6 @@ SP<CX11DataOffer> CX11DataOffer::getX11() {
 
 SP<IDataSource> CX11DataOffer::getSource() {
     return m_source.lock();
-}
-
-void CX11DataOffer::markDead() {
-#ifndef NO_XWAYLAND
-    std::erase(g_pXWayland->m_wm->m_dndDataOffers, m_self);
-#endif
 }
 
 void CX11DataDevice::sendDataOffer(SP<IDataOffer> offer) {
@@ -114,6 +183,23 @@ void CX11DataDevice::sendEnter(uint32_t serial, SP<CWLSurfaceResource> surf, con
         return;
     }
 
+    if (m_dropTimeout)
+        finishDrop(false);
+    const auto                                                       proxy  = getProxyWindow(XSURF->m_xID);
+    auto                                                             conn   = g_pXWayland->m_wm->getConnection();
+    auto                                                             cookie = xcb_get_property(conn, 0, proxy, HYPRATOMS["XdndAware"], XCB_ATOM_ATOM, 0, 1);
+    const std::unique_ptr<xcb_get_property_reply_t, decltype(&free)> aware(xcb_get_property_reply(conn, cookie, nullptr), free);
+    if (!aware || aware->format != 32 || aware->value_len < 1)
+        return;
+
+    const auto version = *sc<const uint32_t*>(xcb_get_property_value(aware.get()));
+    if (version < 3)
+        return;
+
+    m_target  = XSURF->m_xID;
+    m_proxy   = proxy;
+    m_version = std::min<uint32_t>(version, XDND_VERSION);
+
     std::vector<xcb_atom_t> targets;
     // reserve to avoid reallocations
     targets.reserve(SOURCE->mimes().size());
@@ -127,14 +213,13 @@ void CX11DataDevice::sendEnter(uint32_t serial, SP<CWLSurfaceResource> surf, con
     xcb_set_selection_owner(g_pXWayland->m_wm->getConnection(), g_pXWayland->m_wm->m_dndSelection.window, HYPRATOMS["XdndSelection"], XCB_TIME_CURRENT_TIME);
     xcb_flush(g_pXWayland->m_wm->getConnection());
 
-    xcb_window_t              targetWindow = getProxyWindow(XSURF->m_xID);
-
     xcb_client_message_data_t data = {{0}};
     data.data32[0]                 = g_pXWayland->m_wm->m_dndSelection.window;
-    data.data32[1]                 = XDND_VERSION << 24;
-    data.data32[1] |= 1;
+    data.data32[1]                 = (m_version << 24) | (targets.size() > 3 ? 1 : 0);
+    for (size_t i = 0; i < std::min<size_t>(targets.size(), 3); ++i)
+        data.data32[i + 2] = targets[i];
 
-    sendDndEvent(targetWindow, HYPRATOMS["XdndEnter"], data);
+    sendDndEvent(HYPRATOMS["XdndEnter"], data);
 
     m_lastSurface = XSURF;
     m_lastOffer   = offer;
@@ -150,7 +235,23 @@ void CX11DataDevice::sendEnter(uint32_t serial, SP<CWLSurfaceResource> surf, con
 #endif
 }
 
+CX11DataDevice::~CX11DataDevice() {
+#ifndef NO_XWAYLAND
+    if (m_dropTimeout)
+        g_pEventLoopManager->removeTimer(m_dropTimeout);
+#endif
+}
+
 void CX11DataDevice::cleanupState() {
+#ifndef NO_XWAYLAND
+    if (m_dropTimeout)
+        g_pEventLoopManager->removeTimer(m_dropTimeout);
+    m_dropTimeout.reset();
+    m_target  = XCB_WINDOW_NONE;
+    m_proxy   = XCB_WINDOW_NONE;
+    m_version = 0;
+    m_action  = WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+#endif
     m_lastSurface.reset();
     m_lastOffer.reset();
     m_lastSurfaceCoords = {};
@@ -159,15 +260,16 @@ void CX11DataDevice::cleanupState() {
 
 void CX11DataDevice::sendLeave() {
 #ifndef NO_XWAYLAND
-    if (!m_lastSurface)
+    if (!m_target)
         return;
-
-    xcb_window_t              targetWindow = getProxyWindow(m_lastSurface->m_xID);
 
     xcb_client_message_data_t data = {{0}};
     data.data32[0]                 = g_pXWayland->m_wm->m_dndSelection.window;
 
-    sendDndEvent(targetWindow, HYPRATOMS["XdndLeave"], data);
+    sendDndEvent(HYPRATOMS["XdndLeave"], data);
+    if (const auto source = dragSource(); source && canDrop())
+        source->sendDndAction(WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE);
+    releaseDndSelection(g_pXWayland->m_wm->getConnection(), g_pXWayland->m_wm->m_dndSelection.window);
 
     cleanupState();
 #endif
@@ -178,8 +280,6 @@ void CX11DataDevice::sendMotion(uint32_t timeMs, const Vector2D& local) {
     if (!m_lastSurface || !m_lastOffer || !m_lastOffer->getSource())
         return;
 
-    xcb_window_t              targetWindow = getProxyWindow(m_lastSurface->m_xID);
-
     const auto                XCOORDS = g_pXWaylandManager->waylandToXWaylandCoords(m_lastSurfaceCoords + local);
     const uint32_t            coords  = (sc<uint32_t>(XCOORDS.x) << 16) | sc<uint32_t>(XCOORDS.y);
 
@@ -189,7 +289,7 @@ void CX11DataDevice::sendMotion(uint32_t timeMs, const Vector2D& local) {
     data.data32[3]                 = timeMs;
     data.data32[4]                 = dndActionToAtom(m_lastOffer->getSource()->actions());
 
-    sendDndEvent(targetWindow, HYPRATOMS["XdndPosition"], data);
+    sendDndEvent(HYPRATOMS["XdndPosition"], data);
 
     m_lastTime = timeMs;
 #endif
@@ -202,15 +302,16 @@ void CX11DataDevice::sendDrop() {
         return;
     }
 
-    xcb_window_t              targetWindow = getProxyWindow(m_lastSurface->m_xID);
-
     xcb_client_message_data_t data = {{0}};
     data.data32[0]                 = g_pXWayland->m_wm->m_dndSelection.window;
     data.data32[2]                 = m_lastTime;
 
-    sendDndEvent(targetWindow, HYPRATOMS["XdndDrop"], data);
+    sendDndEvent(HYPRATOMS["XdndDrop"], data);
+    if (const auto source = m_lastOffer->getSource())
+        source->sendDndDropPerformed();
 
-    cleanupState();
+    m_dropTimeout = makeShared<CEventLoopTimer>(std::chrono::seconds(5), [this](auto, auto) { finishDrop(false); }, nullptr);
+    g_pEventLoopManager->addTimer(m_dropTimeout);
 #endif
 }
 
@@ -283,20 +384,9 @@ void CX11DataSource::sendDndAction(wl_data_device_manager_dnd_action a) {
 
 void CX11DataDevice::forceCleanupDnd() {
 #ifndef NO_XWAYLAND
-    if (m_lastOffer) {
-        auto source = m_lastOffer->getSource();
-        if (source) {
-            source->sendDndFinished();
-            source->cancelled();
-        }
-    }
-
-    xcb_set_selection_owner(g_pXWayland->m_wm->getConnection(), XCB_ATOM_NONE, HYPRATOMS["XdndSelection"], XCB_TIME_CURRENT_TIME);
-    xcb_flush(g_pXWayland->m_wm->getConnection());
-
-    cleanupState();
-
-    g_pSeatManager->setPointerFocus(nullptr, {});
-    g_pInputManager->simulateMouseMovement();
+    if (m_dropTimeout)
+        finishDrop(false);
+    else
+        sendLeave();
 #endif
 }

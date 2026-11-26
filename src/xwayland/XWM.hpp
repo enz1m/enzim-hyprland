@@ -118,7 +118,6 @@ class CXWM {
 
     int                onEvent(int fd, uint32_t mask);
     SP<CX11DataDevice> getDataDevice();
-    SP<IDataOffer>     createX11DataOffer(SP<CWLSurfaceResource> surf, SP<IDataSource> source);
     void               updateWorkArea(int x, int y, int w, int h);
 
   private:
@@ -213,7 +212,6 @@ class CXWM {
     SXSelection                               m_primarySelection;
     SXSelection                               m_dndSelection;
     SP<CX11DataDevice>                        m_dndDataDevice = makeShared<CX11DataDevice>();
-    std::vector<SP<CX11DataOffer>>            m_dndDataOffers;
 
     inline xcb_connection_t*                  getConnection() {
         return m_connection ? *m_connection : nullptr;
