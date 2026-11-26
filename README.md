@@ -1,3 +1,5 @@
+> This branch is frozen. Use [`enzim`](https://github.com/enz1m/enzim-hyprland/tree/enzim) for maintained enzimOS compositor builds. It provides `enz-hyprland` and `enz-hyprctl`.
+
 <div align = center>
 
 <img src="https://raw.githubusercontent.com/hyprwm/Hyprland/main/assets/header.svg" width="750" height="300" alt="banner">
