@@ -8,6 +8,7 @@
 #include "../notification/NotificationOverlay.hpp"
 #include "../layout/supplementary/WorkspaceAlgoMatcher.hpp"
 #include "../i18n/Engine.hpp"
+#include "../render/Renderer.hpp"
 
 CPluginSystem::CPluginSystem() {
     g_pFunctionHookSystem = makeUnique<CHookSystem>();
@@ -139,6 +140,10 @@ std::expected<CPlugin*, std::string> CPluginSystem::loadPluginInternal(const std
 void CPluginSystem::unloadPlugin(const CPlugin* plugin, bool eject) {
     if (!plugin)
         return;
+
+    // The last render pass can hold plugin-owned objects whose deleters live in the module.
+    if (g_pHyprRenderer)
+        g_pHyprRenderer->m_renderPass.clear();
 
     if (!eject) {
         PPLUGIN_EXIT_FUNC exitFunc = rc<PPLUGIN_EXIT_FUNC>(dlsym(plugin->m_handle, PLUGIN_EXIT_FUNC_STR));
