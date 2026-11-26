@@ -162,15 +162,30 @@ TEST_CASE(titleBarModeFollowsSurfaceCommit) {
     const auto AFTER_CONFIGURE = HEIGHT();
     const bool COMMITTED       = client.command('c', "processed: c");
     const auto AFTER_COMMIT    = HEIGHT();
-    const bool DESTROYED       = client.command('d', "processed: d");
-    const auto AFTER_DESTROY   = HEIGHT();
-    const bool RESET           = client.command('c', "processed: c");
-    const auto AFTER_RESET     = HEIGHT();
+
+    const bool CLIENT_MODE          = client.command('s', "mode: client");
+    const auto BEFORE_CLIENT_COMMIT = HEIGHT();
+    const bool CLIENT_COMMITTED     = client.command('c', "processed: c");
+    const auto AFTER_CLIENT_COMMIT  = HEIGHT();
+    const bool SERVER_MODE          = client.command('u', "mode: server");
+    const auto BEFORE_SERVER_COMMIT = HEIGHT();
+    const bool SERVER_COMMITTED     = client.command('c', "processed: c");
+    const auto AFTER_SERVER_COMMIT  = HEIGHT();
+
+    const bool DESTROYED     = client.command('d', "processed: d");
+    const auto AFTER_DESTROY = HEIGHT();
+    const bool RESET         = client.command('c', "processed: c");
+    const auto AFTER_RESET   = HEIGHT();
     EXPECT_OK(getFromSocket("/eval hl.config({decoration={titlebar={enabled=false}}}) return \"ok\""));
 
     EXPECT(CREATED && COMMITTED && DESTROYED && RESET, true);
     EXPECT(AFTER_CONFIGURE, BEFORE);
     EXPECT(AFTER_COMMIT, BEFORE - 44);
+    EXPECT(CLIENT_MODE && CLIENT_COMMITTED && SERVER_MODE && SERVER_COMMITTED, true);
+    EXPECT(BEFORE_CLIENT_COMMIT, AFTER_COMMIT);
+    EXPECT(AFTER_CLIENT_COMMIT, BEFORE);
+    EXPECT(BEFORE_SERVER_COMMIT, BEFORE);
+    EXPECT(AFTER_SERVER_COMMIT, AFTER_COMMIT);
     EXPECT(AFTER_DESTROY, AFTER_COMMIT);
     EXPECT(AFTER_RESET, BEFORE);
 }

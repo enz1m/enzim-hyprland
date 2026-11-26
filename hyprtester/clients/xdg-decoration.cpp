@@ -252,6 +252,12 @@ static void runInteractive(SState& state) {
             state.holdCommit = true;
             if (!createDecoration(state))
                 return;
+        } else if (command == 's' || command == 'u') {
+            state.holdCommit = true;
+            if (command == 's')
+                state.decoration->sendSetMode(ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
+            else
+                state.decoration->sendUnsetMode();
         } else if (command == 'd') {
             state.holdCommit = true;
             state.decoration->sendDestroy();
