@@ -1264,6 +1264,7 @@ void CWindow::mapWindow() {
     static auto PNEWTAKESOVERFS    = CConfigValue<Config::INTEGER>("misc:on_focus_under_fullscreen");
     static auto PINITIALWSTRACKING = CConfigValue<Config::INTEGER>("misc:initial_workspace_tracking");
     static auto PAUTOGROUP         = CConfigValue<Config::INTEGER>("group:auto_group");
+    static auto PFORCEONSCREEN     = CConfigValue<Config::INTEGER>("misc:new_float_force_onscreen");
 
     auto        PMONITOR = Desktop::focusState()->monitor();
     if (!Desktop::focusState()->monitor()) {
@@ -1330,9 +1331,11 @@ void CWindow::mapWindow() {
     // registers the animated vars and stuff
     onMap();
 
-    if (suggestsFloat()) {
+    const auto INITIAL_OUTPUT_BOX = PMONITOR->logicalBox();
+    const bool CLIENT_BORDERLESS  = !*PFORCEONSCREEN && m_backend->isX11() && !TRAITS.overrideRedirect && !TRAITS.fullscreen && !TRAITS.transient && !TRAITS.modal &&
+        !TRAITS.suggestsNoInitialFocus && !m_backend->wantsServerDecorations() && m_backend->geometry().box == INITIAL_OUTPUT_BOX;
+    if (CLIENT_BORDERLESS || suggestsFloat())
         m_target->setFloatingInitial(true);
-    }
 
     if (TRAITS.suggestsNoInitialFocus)
         m_state |= WINDOW_STATE_NO_INITIAL_FOCUS;
@@ -1548,7 +1551,7 @@ void CWindow::mapWindow() {
                && Desktop::focusState()->window()                                                   // focused window exists
                && m_grouping->canBeGroupedInto(Desktop::focusState()->window()->grouping().group()) // we can group
                && Desktop::focusState()->window()->m_workspace == m_workspace                       // workspaces match, we're not opening on another ws
-               && !suggestsFloat() && !TRAITS.overrideRedirect                                      // not a window that should float or X11
+               && !CLIENT_BORDERLESS && !suggestsFloat() && !TRAITS.overrideRedirect                // not a window that should float or X11
                && !(m_target->floating() && !Desktop::focusState()->window()->isFloating())         // do not auto-group a floated window into a tiled group
                && !TRAITS.modal                                                                     // no modal grouping
     ) {
@@ -1690,6 +1693,11 @@ void CWindow::mapWindow() {
     g_pDecorationPositioner->forceRecalcFor(m_self.lock());
     m_presentation->updateDecorations();
     layoutTarget()->recalc();
+
+    const auto& placement = m_ruleApplicator->static_;
+    if (CLIENT_BORDERLESS && m_target->floating() && !m_grouping->group() && !(m_state & WINDOW_STATE_PINNED) && PMONITOR->logicalBox() == INITIAL_OUTPUT_BOX &&
+        !placement.center.value_or(false) && !placement.position && !placement.size && !Fullscreen::controller()->isFullscreen(m_self.lock()))
+        m_target->setPositionGlobal(INITIAL_OUTPUT_BOX);
 
     // do animations
     m_realPosition->setConfig(Config::animationTree()->getAnimationPropertyConfig("windowsIn"));
