@@ -1,8 +1,13 @@
 #include "PrimarySelection.hpp"
 #include <algorithm>
 #include "../managers/SeatManager.hpp"
-#include "core/Seat.hpp"
+#include "core/Compositor.hpp"
 using namespace Hyprutils::OS;
+
+static wl_client* keyboardFocusedClient() {
+    const auto focus = g_pSeatManager->m_state.keyboardFocus.lock();
+    return focus ? focus->client() : nullptr;
+}
 
 CPrimarySelectionOffer::CPrimarySelectionOffer(SP<CZwpPrimarySelectionOfferV1> resource_, SP<IDataSource> source_) : m_source(source_), m_resource(resource_) {
     if UNLIKELY (!good())
@@ -13,6 +18,9 @@ CPrimarySelectionOffer::CPrimarySelectionOffer(SP<CZwpPrimarySelectionOfferV1> r
 
     m_resource->setReceive([this](CZwpPrimarySelectionOfferV1* r, const char* mime, int32_t fd) {
         CFileDescriptor sendFd{fd};
+        if (m_resource->client() != keyboardFocusedClient() || !CSeatManager::primarySelectionEnabled())
+            return;
+
         if (!m_source) {
             LOG(Log::WARN, "Possible bug: Receive on an offer w/o a source");
             return;
@@ -172,6 +180,9 @@ CPrimarySelectionManager::CPrimarySelectionManager(SP<CZwpPrimarySelectionDevice
             s->m_device = RESOURCE;
         }
 
+        if (RESOURCE->client() == keyboardFocusedClient() && CSeatManager::primarySelectionEnabled())
+            PROTO::primarySelection->sendSelectionToDevice(RESOURCE, g_pSeatManager->m_selection.currentPrimarySelection.lock());
+
         LOG(Log::DEBUG, "New primary selection data device bound at {:x}", (uintptr_t)RESOURCE.get());
     });
 
@@ -215,11 +226,13 @@ void CPrimarySelectionProtocol::bindManager(wl_client* client, void* data, uint3
         return;
     }
 
-    LOG(Log::DEBUG, "New primary_seletion_manager at {:x}", (uintptr_t)RESOURCE.get());
+    LOG(Log::DEBUG, "New primary selection manager at {:x}", (uintptr_t)RESOURCE.get());
 
-    // we need to do it here because protocols come before seatMgr
-    if (!m_listeners.onPointerFocusChange)
-        m_listeners.onPointerFocusChange = g_pSeatManager->m_events.pointerFocusChange.listen([this] { this->onPointerFocus(); });
+    // The seat manager is unavailable during protocol construction.
+    if (!m_keyboardFocusChange) {
+        m_keyboardFocusChange = g_pSeatManager->m_events.keyboardFocusChange.listen([this] { onKeyboardFocus(); });
+        onKeyboardFocus();
+    }
 }
 
 void CPrimarySelectionProtocol::destroyResource(CPrimarySelectionManager* resource) {
@@ -261,66 +274,25 @@ void CPrimarySelectionProtocol::sendSelectionToDevice(SP<CPrimarySelectionDevice
 }
 
 void CPrimarySelectionProtocol::setSelection(SP<IDataSource> source) {
-    for (auto const& o : m_offers) {
-        if (o->m_source && o->m_source->hasDnd())
-            continue;
-        o->m_dead = true;
+    for (const auto& offer : m_offers)
+        offer->m_dead = true;
+
+    const auto client = keyboardFocusedClient();
+    for (const auto& device : m_devices) {
+        if (device->client() == client)
+            sendSelectionToDevice(device, source);
     }
-
-    if (!source) {
-        LOG(Log::DEBUG, "resetting selection");
-
-        if (!g_pSeatManager->m_state.pointerFocusResource)
-            return;
-
-        auto DESTDEVICE = dataDeviceForClient(g_pSeatManager->m_state.pointerFocusResource->client());
-        if (DESTDEVICE)
-            sendSelectionToDevice(DESTDEVICE, nullptr);
-
-        return;
-    }
-
-    LOG(Log::DEBUG, "New selection for data source {:x}", (uintptr_t)source.get());
-
-    if (!g_pSeatManager->m_state.pointerFocusResource)
-        return;
-
-    auto DESTDEVICE = dataDeviceForClient(g_pSeatManager->m_state.pointerFocusResource->client());
-
-    if (!DESTDEVICE) {
-        LOG(Log::DEBUG, "CWLDataDeviceProtocol::setSelection: cannot send selection to a client without a data_device");
-        return;
-    }
-
-    sendSelectionToDevice(DESTDEVICE, source);
 }
 
-void CPrimarySelectionProtocol::updateSelection() {
-    if (!g_pSeatManager->m_state.pointerFocusResource)
-        return;
-
-    auto selection  = g_pSeatManager->m_selection.currentPrimarySelection.lock();
-    auto DESTDEVICE = dataDeviceForClient(g_pSeatManager->m_state.pointerFocusResource->client());
-
-    if (!selection || !DESTDEVICE) {
-        LOG(Log::DEBUG, "CPrimarySelectionProtocol::updateSelection: cannot send selection to a client without a data_device");
-        return;
+void CPrimarySelectionProtocol::onKeyboardFocus() {
+    const auto client = keyboardFocusedClient();
+    if (m_focusedClient != client) {
+        for (const auto& device : m_devices) {
+            if (device->client() == m_focusedClient)
+                device->sendSelection(nullptr);
+        }
     }
 
-    sendSelectionToDevice(DESTDEVICE, g_pSeatManager->m_selection.currentPrimarySelection.lock());
-}
-
-void CPrimarySelectionProtocol::onPointerFocus() {
-    for (auto const& o : m_offers) {
-        o->m_dead = true;
-    }
-
-    updateSelection();
-}
-
-SP<CPrimarySelectionDevice> CPrimarySelectionProtocol::dataDeviceForClient(wl_client* c) {
-    auto it = std::ranges::find_if(m_devices, [c](const auto& e) { return e->client() == c; });
-    if (it == m_devices.end())
-        return nullptr;
-    return *it;
+    m_focusedClient = client;
+    setSelection(CSeatManager::primarySelectionEnabled() ? g_pSeatManager->m_selection.currentPrimarySelection.lock() : nullptr);
 }

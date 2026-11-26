@@ -105,11 +105,7 @@ class CPrimarySelectionProtocol : public IWaylandProtocol {
     //
     void setSelection(SP<IDataSource> source);
     void sendSelectionToDevice(SP<CPrimarySelectionDevice> dev, SP<IDataSource> sel);
-    void updateSelection();
-    void onPointerFocus();
-
-    //
-    SP<CPrimarySelectionDevice> dataDeviceForClient(wl_client*);
+    void onKeyboardFocus();
 
     friend class CPrimarySelectionManager;
     friend class CPrimarySelectionDevice;
@@ -117,9 +113,8 @@ class CPrimarySelectionProtocol : public IWaylandProtocol {
     friend class CPrimarySelectionOffer;
     friend class CSeatManager;
 
-    struct {
-        CHyprSignalListener onPointerFocusChange;
-    } m_listeners;
+    wl_client*          m_focusedClient = nullptr;
+    CHyprSignalListener m_keyboardFocusChange;
 };
 
 namespace PROTO {
