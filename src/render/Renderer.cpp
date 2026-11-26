@@ -592,19 +592,18 @@ void IHyprRenderer::renderWindow(PHLWINDOW pWindow, PHLMONITOR pMonitor, const T
     const bool USE_WORKSPACE_FADE_ALPHA = pWindow->presentation().movingFromMonitor() && (!PWORKSPACE || !PWORKSPACE->visible());
 
     renderdata.surface   = pWindow->wlSurface()->resource();
-    renderdata.dontRound = Fullscreen::controller()->getFullscreenModes(pWindow).internal == Fullscreen::FSMODE_FULLSCREEN;
+    renderdata.dontRound = Fullscreen::controller()->getFullscreenModes(pWindow).internal == Fullscreen::FSMODE_FULLSCREEN || pWindow->borderlessFullscreen();
     renderdata.fadeAlpha = pWindow->presentation().alphaValue(WINDOW_ALPHA_FADE) * pWindow->presentation().alphaValue(WINDOW_ALPHA_FULLSCREEN) *
         pWindow->presentation().alphaValue(WINDOW_ALPHA_LAYOUT) * ((pWindow->m_state & WINDOW_STATE_PINNED) || USE_WORKSPACE_FADE_ALPHA ? 1.f : PWORKSPACE->m_alpha->value()) *
         (USE_WORKSPACE_FADE_ALPHA ? pWindow->presentation().alphaValue(WINDOW_ALPHA_MOVE_TO_WORKSPACE) : 1.F) *
         pWindow->presentation().alphaValue(WINDOW_ALPHA_MOVE_FROM_WORKSPACE);
-    renderdata.alpha = pWindow->presentation().alphaValue(WINDOW_ALPHA_ACTIVE);
-    renderdata.decorate =
-        decorate && !pWindow->backend().traits().suggestsNoBorder && Fullscreen::controller()->getFullscreenModes(pWindow).internal != Fullscreen::FSMODE_FULLSCREEN;
-    renderdata.rounding      = standalone || renderdata.dontRound ? 0 : pWindow->presentation().rounding() * pMonitor->m_scale;
-    renderdata.roundingPower = standalone || renderdata.dontRound ? 2.0f : pWindow->presentation().roundingPower();
+    renderdata.alpha            = pWindow->presentation().alphaValue(WINDOW_ALPHA_ACTIVE);
+    renderdata.decorate         = decorate && !pWindow->backend().traits().suggestsNoBorder && !renderdata.dontRound;
+    renderdata.rounding         = standalone || renderdata.dontRound ? 0 : pWindow->presentation().rounding() * pMonitor->m_scale;
+    renderdata.roundingPower    = standalone || renderdata.dontRound ? 2.0f : pWindow->presentation().roundingPower();
     renderdata.squareTopCorners = !standalone && !renderdata.dontRound && pWindow->presentation().titleBarShown();
-    renderdata.blur          = !standalone && !m_bRenderingSnapshot && pWindow->shouldBlur();
-    renderdata.pWindow       = pWindow;
+    renderdata.blur             = !standalone && !m_bRenderingSnapshot && pWindow->shouldBlur();
+    renderdata.pWindow          = pWindow;
 
     if (standalone) {
         renderdata.alpha     = 1.f;

@@ -245,9 +245,23 @@ void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_
         XSURF->m_events.metadataChanged.emit();
     };
 
+    auto updateDecorations = [&]() {
+        const auto SURFACE = XSURF->m_surface.lock();
+        const auto VIEW    = SURFACE ? Desktop::View::CWLSurface::fromResource(SURFACE) : nullptr;
+        if (const auto WINDOW = VIEW ? Desktop::View::CWindow::fromView(VIEW->view()) : nullptr)
+            WINDOW->presentation().onDecorationModeChanged();
+    };
+
     auto handleWindowType = [&]() {
-        auto* atomsArr = rc<const xcb_atom_t*>(value);
-        XSURF->m_atoms.assign(atomsArr, atomsArr + reply->value_len);
+        if (reply->type == XCB_ATOM_NONE)
+            XSURF->m_atoms.clear();
+        else if (reply->type == XCB_ATOM_ATOM && reply->format == 32) {
+            const auto* atoms = rc<const xcb_atom_t*>(value);
+            XSURF->m_atoms.assign(atoms, atoms + reply->value_len);
+        } else
+            return;
+
+        updateDecorations();
     };
 
     auto handleWMState = [&]() {
@@ -338,20 +352,31 @@ void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_
         constexpr uint32_t  MWM_DECOR_TITLE       = 1 << 3;
 
         std::optional<bool> titleBar;
+        bool                noDecorations = false;
         if (reply->format == 32 && reply->value_len >= 3) {
             const auto* hints = rc<const uint32_t*>(value);
-            if (hints[0] & MWM_HINTS_DECORATIONS)
-                titleBar = (hints[2] & (MWM_DECOR_ALL | MWM_DECOR_TITLE)) != 0;
+            if (hints[0] & MWM_HINTS_DECORATIONS) {
+                // Motif's ALL bit makes the remaining bits exclusions.
+                titleBar      = bool(hints[2] & MWM_DECOR_ALL) != bool(hints[2] & MWM_DECOR_TITLE);
+                noDecorations = hints[2] == 0;
+            }
         }
 
-        if (XSURF->m_motifTitleBar == titleBar)
+        if (XSURF->m_motifTitleBar == titleBar && XSURF->m_motifNoDecorations == noDecorations)
             return;
 
-        XSURF->m_motifTitleBar = titleBar;
-        const auto SURFACE     = XSURF->m_surface.lock();
-        const auto VIEW        = SURFACE ? Desktop::View::CWLSurface::fromResource(SURFACE) : nullptr;
-        if (const auto WINDOW = VIEW ? Desktop::View::CWindow::fromView(VIEW->view()) : nullptr)
-            WINDOW->presentation().onDecorationModeChanged();
+        XSURF->m_motifTitleBar      = titleBar;
+        XSURF->m_motifNoDecorations = noDecorations;
+        updateDecorations();
+    };
+
+    auto handleGtkFrameExtents = [&]() {
+        const bool HAS_EXTENTS = reply->type == XCB_ATOM_CARDINAL && reply->format == 32 && reply->value_len == 4;
+        if (XSURF->m_hasGtkFrameExtents == HAS_EXTENTS)
+            return;
+
+        XSURF->m_hasGtkFrameExtents = HAS_EXTENTS;
+        updateDecorations();
     };
 
     auto handleWMProtocols = [&]() {
@@ -381,6 +406,8 @@ void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_
         handleWMProtocols();
     else if (atom == HYPRATOMS["_MOTIF_WM_HINTS"])
         handleMotifHints();
+    else if (atom == HYPRATOMS["_GTK_FRAME_EXTENTS"])
+        handleGtkFrameExtents();
     else {
         LOG(Log::TRACE, "[xwm] Unhandled prop {} -> {}", atom, propName);
         return;
@@ -1206,7 +1233,7 @@ void CXWM::onNewResource(SP<CXWaylandSurfaceResource> resource) {
 }
 
 void CXWM::readWindowData(SP<CXWaylandSurface> surf) {
-    const std::array<xcb_atom_t, 10> interestingProps = {
+    const std::array<xcb_atom_t, 11> interestingProps = {
         XCB_ATOM_WM_CLASS,
         XCB_ATOM_WM_NAME,
         XCB_ATOM_WM_TRANSIENT_FOR,
@@ -1217,6 +1244,7 @@ void CXWM::readWindowData(SP<CXWaylandSurface> surf) {
         HYPRATOMS["WM_NORMAL_HINTS"],
         HYPRATOMS["WM_PROTOCOLS"],
         HYPRATOMS["_MOTIF_WM_HINTS"],
+        HYPRATOMS["_GTK_FRAME_EXTENTS"],
     };
 
     for (size_t i = 0; i < interestingProps.size(); i++) {

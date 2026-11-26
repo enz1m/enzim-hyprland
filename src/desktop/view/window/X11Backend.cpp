@@ -95,7 +95,7 @@ static SBackendTraits traitsFrom(const SP<CXWaylandSurface>& surface) {
         .suggestsFloat          = FLOATING_ATOM || surface->m_modal || surface->m_transient || ROLE_FLOATS || surface->m_overrideRedirect || surface->m_parent || FIXED_SIZE,
         .suggestsNoInitialFocus = NO_INITIAL_FOCUS_ATOM,
         .preventsFocus          = PREVENTS_FOCUS_ATOM,
-        .suggestsNoBorder       = NO_BORDER_ATOM || surface->m_overrideRedirect,
+        .suggestsNoBorder       = NO_BORDER_ATOM || surface->m_overrideRedirect || surface->m_motifNoDecorations || surface->m_hasGtkFrameExtents,
         .fullscreen             = surface->m_fullscreen,
     };
 }
@@ -298,15 +298,29 @@ SBackendTraits CX11Backend::traits() const {
 
 bool CX11Backend::wantsServerDecorations() const {
     const auto SURFACE = m_xwaylandSurface.lock();
-    if (!SURFACE || SURFACE->m_overrideRedirect || SURFACE->m_motifTitleBar == false)
+    if (!SURFACE || SURFACE->m_overrideRedirect || SURFACE->m_motifTitleBar == false || SURFACE->m_hasGtkFrameExtents)
         return false;
 
 #ifndef NO_XWAYLAND
-    // Toolkit-typed windows other than these are menus, tooltips, docks and splash screens.
-    static const std::array FRAMED_TYPES = {HYPRATOMS["_NET_WM_WINDOW_TYPE_NORMAL"], HYPRATOMS["_NET_WM_WINDOW_TYPE_DIALOG"]};
-    if (!SURFACE->m_atoms.empty() && std::ranges::none_of(SURFACE->m_atoms, [](const auto atom) { return std::ranges::find(FRAMED_TYPES, atom) != FRAMED_TYPES.end(); }))
-        return false;
+    static const std::array UNFRAMED_TYPES = {
+        HYPRATOMS["_NET_WM_WINDOW_TYPE_DESKTOP"],       HYPRATOMS["_NET_WM_WINDOW_TYPE_DOCK"],       HYPRATOMS["_NET_WM_WINDOW_TYPE_TOOLBAR"],
+        HYPRATOMS["_NET_WM_WINDOW_TYPE_MENU"],          HYPRATOMS["_NET_WM_WINDOW_TYPE_UTILITY"],    HYPRATOMS["_NET_WM_WINDOW_TYPE_SPLASH"],
+        HYPRATOMS["_NET_WM_WINDOW_TYPE_DROPDOWN_MENU"], HYPRATOMS["_NET_WM_WINDOW_TYPE_POPUP_MENU"], HYPRATOMS["_NET_WM_WINDOW_TYPE_TOOLTIP"],
+        HYPRATOMS["_NET_WM_WINDOW_TYPE_NOTIFICATION"],  HYPRATOMS["_NET_WM_WINDOW_TYPE_COMBO"],      HYPRATOMS["_NET_WM_WINDOW_TYPE_DND"],
+        HYPRATOMS["_KDE_NET_WM_WINDOW_TYPE_OVERRIDE"],
+    };
+
+    // EWMH lists types in priority order, including fallbacks for unknown types.
+    for (const auto atom : SURFACE->m_atoms) {
+        if (std::ranges::find(UNFRAMED_TYPES, atom) != UNFRAMED_TYPES.end())
+            return false;
+        if (atom == HYPRATOMS["_NET_WM_WINDOW_TYPE_NORMAL"] || atom == HYPRATOMS["_NET_WM_WINDOW_TYPE_DIALOG"])
+            break;
+    }
 #endif
+
+    if (const auto MONITOR = preferredMonitor(nullptr); MONITOR && !SURFACE->m_motifTitleBar.has_value() && geometry().box == MONITOR->logicalBox())
+        return false;
 
     return true;
 }

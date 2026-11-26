@@ -1125,6 +1125,7 @@ void CWindow::onConfigureRequest(const CBox& box) {
     m_backend->configure(box, m_monitor.lock());
     acknowledgeClientGeometry(box);
     m_presentation->updateDecorations();
+    updateBorderlessFullscreen();
 
     if (!m_workspace || !m_workspace->visible())
         return; // further things are only for visible windows
