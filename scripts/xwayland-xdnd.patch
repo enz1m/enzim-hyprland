@@ -1,0 +1,475 @@
+diff --git a/hw/xwayland/xwayland-input.c b/hw/xwayland/xwayland-input.c
+index 8231c10..578603a 100644
+--- a/hw/xwayland/xwayland-input.c
++++ b/hw/xwayland/xwayland-input.c
+@@ -618,6 +618,7 @@ pointer_handle_leave(void *data, struct wl_pointer *pointer,
+     Bool focus_lost = FALSE;
+ 
+     xwl_screen->serial = serial;
++    xwl_xdnd_pointer_reset(get_pointer_device(xwl_seat));
+     BUG_WARN(xwl_seat->pointer_enter_count == 0);
+     if (xwl_seat->pointer_enter_count > 0)
+         xwl_seat->pointer_enter_count--;
+@@ -833,8 +834,15 @@ pointer_handle_button(void *data, struct wl_pointer *pointer, uint32_t serial,
+     }
+ 
+     valuator_mask_zero(&mask);
+-    QueuePointerEvents(get_pointer_device(xwl_seat),
+-                       state ? ButtonPress : ButtonRelease, index, 0, &mask);
++    DeviceIntPtr device = get_pointer_device(xwl_seat);
++    const XID origin = xwl_seat->focus_window ? xwl_seat->focus_window->toplevel->drawable.id : None;
++    if (!state)
++        xwl_xdnd_pointer_button(device, origin, serial, button, FALSE);
++    QueuePointerEvents(device, state ? ButtonPress : ButtonRelease, index, 0, &mask);
++    if (state && xwl_xdnd_active()) {
++        mieqProcessInputEvents();
++        xwl_xdnd_pointer_button(device, origin, serial, button, TRUE);
++    }
+ }
+ 
+ static void
+diff --git a/hw/xwayland/xwayland-input.h b/hw/xwayland/xwayland-input.h
+index 9a2a40d..21ce6a8 100644
+--- a/hw/xwayland/xwayland-input.h
++++ b/hw/xwayland/xwayland-input.h
+@@ -215,4 +215,9 @@ void xwl_seat_unconfine_pointer(struct xwl_seat *xwl_seat);
+ 
+ void xwl_screen_release_tablet_manager(struct xwl_screen *xwl_screen);
+ 
++Bool xwl_xdnd_active(void);
++void xwl_xdnd_pointer_reset(DeviceIntPtr device);
++void xwl_xdnd_pointer_button(DeviceIntPtr device, XID origin, CARD32 serial,
++                             CARD32 button, Bool pressed);
++
+ #endif /* XWAYLAND_INPUT_H */
+diff --git a/hw/xwayland/xwayland.c b/hw/xwayland/xwayland.c
+index 81b8a7e..3e8c336 100644
+--- a/hw/xwayland/xwayland.c
++++ b/hw/xwayland/xwayland.c
+@@ -30,6 +30,9 @@
+ #endif
+ 
+ #include <stdio.h>
++#include <linux/input.h>
++#include <inputstr.h>
++#include <xacestr.h>
+ #include <errno.h>
+ 
+ #include <X11/Xatom.h>
+@@ -50,6 +53,7 @@
+ #include <version-config.h>
+ 
+ #include "xwayland-screen.h"
++#include "xwayland-input.h"
+ #include "xwayland-vidmode.h"
+ 
+ #ifdef XF86VIDMODE
+@@ -277,11 +281,346 @@ ddxProcessArgument(int argc, char *argv[], int i)
+     return 0;
+ }
+ 
++#ifdef XACE
++#define XDND_EXTENSION "ENZIM-XDND-1"
++#define XDND_REGISTER_PROXY 1
++#define XDND_QUERY 2
++#define XDND_GUARD_REQUESTOR 3
++
++static ClientPtr xdnd_wm;
++static Atom xdnd_selection, xdnd_enter, xdnd_position, xdnd_leave, xdnd_drop, xdnd_revoked;
++static XID xdnd_proxy;
++static DevPrivateKeyRec xdnd_requestor_key;
++static XID xdnd_client;
++static CARD32 xdnd_generation;
++struct xdnd_press {
++    DeviceIntPtr device;
++    CARD32 serial;
++    CARD32 button;
++    XID origin;
++    XID client;
++    Bool released;
++};
++static struct xdnd_press xdnd_press[KEY_CNT], xdnd_gesture;
++
++static Bool
++xdnd_wm_live(void)
++{
++    return xdnd_wm && xdnd_wm->clientState == ClientStateRunning && !xdnd_wm->clientGone;
++}
++
++Bool
++xwl_xdnd_active(void)
++{
++    return xdnd_proxy && xdnd_wm_live();
++}
++
++static void
++xdnd_clear_gesture(void)
++{
++    xdnd_client = 0;
++    memset(xdnd_press, 0, sizeof(xdnd_press));
++    memset(&xdnd_gesture, 0, sizeof(xdnd_gesture));
++}
++
++static XID
++xdnd_grab_client(DeviceIntPtr device)
++{
++    DeviceIntPtr master = GetMaster(device, POINTER_OR_FLOAT);
++    GrabPtr grab = master ? master->deviceGrab.grab : NULL;
++    return grab ? CLIENT_ID(grab->resource) : 0;
++}
++
++static Bool
++xdnd_gesture_grab(DeviceIntPtr master)
++{
++    return xdnd_client && !xdnd_gesture.released && GetMaster(xdnd_gesture.device, POINTER_OR_FLOAT) == master;
++}
++
++/* The compositor learns that the source's drag grab ended before button-up. */
++static void
++xdnd_revoke(void)
++{
++    xEvent event = {0};
++
++    xdnd_client = 0;
++    if (!xwl_xdnd_active())
++        return;
++    event.u.u.type = ClientMessage;
++    event.u.u.detail = 32;
++    event.u.u.sequenceNumber = xdnd_wm->sequence;
++    event.u.clientMessage.window = xdnd_proxy;
++    event.u.clientMessage.u.l.type = xdnd_revoked;
++    event.u.clientMessage.u.l.longs0 = xdnd_generation;
++    WriteEventsToClient(xdnd_wm, 1, &event);
++}
++
++/* Replacing the press's implicit grab or regrabbing keeps the drag; any other change ends it. */
++static void
++xdnd_activate_grab(DeviceIntPtr device, GrabPtr grab, TimeStamp time, Bool autoGrab)
++{
++    ActivatePointerGrab(device, grab, time, autoGrab);
++    if (xdnd_gesture_grab(device) && CLIENT_ID(grab->resource) != xdnd_client)
++        xdnd_revoke();
++}
++
++static void
++xdnd_deactivate_grab(DeviceIntPtr device)
++{
++    DeactivatePointerGrab(device);
++    if (xdnd_gesture_grab(device))
++        xdnd_revoke();
++}
++
++void
++xwl_xdnd_pointer_button(DeviceIntPtr device, XID origin, CARD32 serial,
++                        CARD32 button, Bool pressed)
++{
++    if (!xwl_xdnd_active() || button >= ARRAY_SIZE(xdnd_press))
++        return;
++    if (!pressed) {
++        if (xdnd_press[button].device == device)
++            xdnd_press[button].released = TRUE;
++        if (xdnd_gesture.device == device && xdnd_gesture.button == button && !xdnd_gesture.released) {
++            if (xdnd_gesture.client != xdnd_grab_client(device))
++                xdnd_client = 0;
++            xdnd_gesture.released = TRUE;
++        }
++        return;
++    }
++    DeviceIntPtr master = GetMaster(device, POINTER_OR_FLOAT);
++    if (master && master->deviceGrab.ActivateGrab == ActivatePointerGrab &&
++        master->deviceGrab.DeactivateGrab == DeactivatePointerGrab) {
++        master->deviceGrab.ActivateGrab = xdnd_activate_grab;
++        master->deviceGrab.DeactivateGrab = xdnd_deactivate_grab;
++    }
++    xdnd_press[button] = (struct xdnd_press) {
++        .device = device, .serial = serial, .button = button, .origin = origin,
++        .client = xdnd_grab_client(device)
++    };
++}
++
++void
++xwl_xdnd_pointer_reset(DeviceIntPtr device)
++{
++    for (unsigned int button = 0; button < ARRAY_SIZE(xdnd_press); button++)
++        if (xdnd_press[button].device == device)
++            xdnd_press[button] = (struct xdnd_press) {0};
++    if (xdnd_gesture.device == device && !xdnd_gesture.released)
++        xdnd_client = 0;
++}
++
++static void
++xdnd_selection_changed(CallbackListPtr *callbacks, void *data, void *arg)
++{
++    SelectionInfoRec *info = arg;
++    if (info->selection->selection != xdnd_selection)
++        return;
++
++    ++xdnd_generation;
++    xdnd_client = 0;
++    if (!xwl_xdnd_active() || info->kind != SelectionSetOwner || !info->selection->client ||
++        !info->selection->window)
++        return;
++
++    XID client = info->selection->client->index;
++    if (client != CLIENT_ID(info->selection->window))
++        return;
++
++    for (unsigned int button = 0; button < ARRAY_SIZE(xdnd_press); button++) {
++        const struct xdnd_press *press = &xdnd_press[button];
++        DeviceIntPtr master = press->device ? GetMaster(press->device, POINTER_OR_FLOAT) : NULL;
++        if (!press->released && press->client == client && CLIENT_ID(press->origin) == client &&
++            master && master->deviceGrab.DeactivateGrab == xdnd_deactivate_grab &&
++            xdnd_grab_client(press->device) == client &&
++            (!xdnd_client || (INT32)(press->serial - xdnd_gesture.serial) > 0)) {
++            xdnd_client = client;
++            xdnd_gesture = *press;
++        }
++    }
++}
++
++/* Client records are freed after this callback, so nothing may keep the WM's pointer or index. */
++static void
++xdnd_client_state(CallbackListPtr *callbacks, void *data, void *arg)
++{
++    ClientPtr client = ((NewClientInfoRec *) arg)->client;
++    if (client->clientState != ClientStateRetained && client->clientState != ClientStateGone)
++        return;
++    if (client == xdnd_wm) {
++        xdnd_wm = NULL;
++        xdnd_proxy = 0;
++        ++xdnd_generation;
++        xdnd_clear_gesture();
++        return;
++    }
++    for (unsigned int button = 0; button < ARRAY_SIZE(xdnd_press); button++)
++        if (xdnd_press[button].client == client->index)
++            xdnd_press[button] = (struct xdnd_press) {0};
++    if (xdnd_client == client->index)
++        xdnd_client = 0;
++}
++
++static Bool
++xdnd_authorized(void)
++{
++    return xdnd_client && (xdnd_gesture.released || xdnd_grab_client(xdnd_gesture.device) == xdnd_client);
++}
++
++static void
++xdnd_send_access(CallbackListPtr *callbacks, void *data, void *arg)
++{
++    XaceSendAccessRec *access = arg;
++    if (!xwl_xdnd_active() || access->client == xdnd_wm || access->client == serverClient)
++        return;
++
++    for (int i = 0; i < access->count; i++) {
++        xEvent *event = &access->events[i];
++        const int type = event->u.u.type & 0x7f;
++        if (type == ClientMessage && event->u.clientMessage.window == xdnd_proxy &&
++            event->u.clientMessage.u.l.type == xdnd_revoked) {
++            access->status = BadAccess;
++        } else if (type == ClientMessage && event->u.clientMessage.window == xdnd_proxy &&
++            (event->u.clientMessage.u.l.type == xdnd_enter || event->u.clientMessage.u.l.type == xdnd_position ||
++             event->u.clientMessage.u.l.type == xdnd_leave || event->u.clientMessage.u.l.type == xdnd_drop)) {
++            if (access->pWin->drawable.id != xdnd_proxy || !xdnd_authorized() ||
++                access->client->index != xdnd_client || event->u.u.detail != 32 ||
++                CLIENT_ID((XID)event->u.clientMessage.u.l.longs0) != xdnd_client)
++                access->status = BadAccess;
++        } else if (type == SelectionNotify && event->u.selectionNotify.selection == xdnd_selection &&
++                   CLIENT_ID(event->u.selectionNotify.requestor) == xdnd_wm->index) {
++            if (access->pWin->drawable.id != event->u.selectionNotify.requestor ||
++                !xdnd_authorized() || access->client->index != xdnd_client)
++                access->status = BadAccess;
++        }
++    }
++}
++
++static void
++xdnd_window_access(CallbackListPtr *callbacks, void *data, void *arg)
++{
++    XaceResourceAccessRec *access = arg;
++    if (!xwl_xdnd_active() || access->rtype != RT_WINDOW || access->client == xdnd_wm ||
++        access->client == serverClient || CLIENT_ID(access->id) != xdnd_wm->index)
++        return;
++
++    WindowPtr window = access->res;
++    const CARD32 *generation = dixLookupPrivate(&window->devPrivates, &xdnd_requestor_key);
++    if (access->id != xdnd_proxy && !*generation)
++        return;
++    if (access->access_mode & (DixSetAttrAccess | DixDestroyAccess | DixManageAccess |
++                               DixRemoveAccess | DixAddAccess))
++        access->status = BadAccess;
++    if (access->access_mode & DixSetPropAccess &&
++        !(*generation && *generation == xdnd_generation && xdnd_authorized() && access->client->index == xdnd_client))
++        access->status = BadAccess;
++}
++
++static int
++xdnd_dispatch(ClientPtr client)
++{
++    typedef struct {
++        CARD8 reqType, data;
++        CARD16 length;
++        CARD32 window, generation;
++    } xXdndReq;
++    REQUEST(xXdndReq);
++    if (!xdnd_wm_live() || client != xdnd_wm || client->swapped)
++        return BadAccess;
++    REQUEST_SIZE_MATCH(xXdndReq);
++
++    WindowPtr window;
++    Selection *selection;
++    switch (stuff->data) {
++    case XDND_REGISTER_PROXY:
++    case XDND_GUARD_REQUESTOR:
++        if (!stuff->window || CLIENT_ID(stuff->window) != client->index ||
++            dixLookupWindow(&window, stuff->window, client, DixSetAttrAccess) != Success)
++            return BadWindow;
++        if (stuff->data == XDND_REGISTER_PROXY) {
++            xdnd_proxy = stuff->window;
++            return Success;
++        }
++        if (!xwl_xdnd_active() || !xdnd_authorized() || stuff->generation != xdnd_generation)
++            return BadAccess;
++        CARD32 *generation = dixLookupPrivate(&window->devPrivates, &xdnd_requestor_key);
++        *generation = xdnd_generation;
++        return Success;
++    case XDND_QUERY: {
++        xGenericReply reply = {
++            .type = X_Reply,
++            .sequenceNumber = client->sequence,
++        };
++        if (xwl_xdnd_active() && xdnd_authorized() &&
++            dixLookupSelection(&selection, xdnd_selection, client, DixGetAttrAccess) == Success) {
++            reply.data00 = selection->window;
++            reply.data01 = xdnd_gesture.serial;
++            reply.data02 = xdnd_generation;
++            reply.data03 = xdnd_gesture.button;
++            reply.data04 = xdnd_gesture.released;
++            reply.data05 = selection->lastTimeChanged.milliseconds;
++        }
++        WriteReplyToClient(client, sizeof(reply), &reply);
++        return Success;
++    }
++    default:
++        return BadRequest;
++    }
++}
++
++static void
++xdnd_extension_init(void)
++{
++    xdnd_wm = NULL;
++    xdnd_proxy = 0;
++    ++xdnd_generation;
++    xdnd_clear_gesture();
++    if (wm_fd < 0 ||
++        !dixRegisterPrivateKey(&xdnd_requestor_key, PRIVATE_WINDOW, sizeof(CARD32)))
++        return;
++    xdnd_selection = MakeAtom("XdndSelection", strlen("XdndSelection"), TRUE);
++    xdnd_enter = MakeAtom("XdndEnter", strlen("XdndEnter"), TRUE);
++    xdnd_position = MakeAtom("XdndPosition", strlen("XdndPosition"), TRUE);
++    xdnd_leave = MakeAtom("XdndLeave", strlen("XdndLeave"), TRUE);
++    xdnd_drop = MakeAtom("XdndDrop", strlen("XdndDrop"), TRUE);
++    xdnd_revoked = MakeAtom("_ENZIM_XDND_REVOKED", strlen("_ENZIM_XDND_REVOKED"), TRUE);
++    if (!AddCallback(&SelectionCallback, xdnd_selection_changed, NULL) ||
++        !AddCallback(&ClientStateCallback, xdnd_client_state, NULL) ||
++        !XaceRegisterCallback(XACE_SEND_ACCESS, xdnd_send_access, NULL) ||
++        !XaceRegisterCallback(XACE_RESOURCE_ACCESS, xdnd_window_access, NULL))
++        return;
++    AddExtension(XDND_EXTENSION, 0, 0, xdnd_dispatch, xdnd_dispatch, NULL, StandardMinorOpcode);
++}
++
++static Bool noXdndExtension = FALSE;
++#else
++Bool
++xwl_xdnd_active(void)
++{
++    return FALSE;
++}
++
++void
++xwl_xdnd_pointer_reset(DeviceIntPtr device)
++{
++}
++
++void
++xwl_xdnd_pointer_button(DeviceIntPtr device, XID origin, CARD32 serial,
++                        CARD32 button, Bool pressed)
++{
++}
++#endif
++
+ static CARD32
+ add_client_fd(OsTimerPtr timer, CARD32 time, void *arg)
+ {
+-    if (!AddClientOnOpenFD(wm_fd))
++    ClientPtr client = AddClientOnOpenFD(wm_fd);
++    if (!client)
+         FatalError("Failed to add wm client\n");
++#ifdef XACE
++    xdnd_wm = client;
++#endif
+ 
+     TimerFree(timer);
+ 
+@@ -417,6 +756,9 @@ xwlExtensionInit(void)
+ #endif
+ 
+ static const ExtensionModule xwayland_extensions[] = {
++#ifdef XACE
++    { xdnd_extension_init, XDND_EXTENSION, &noXdndExtension },
++#endif
+ #ifdef XF86VIDMODE
+     { xwlVidModeExtensionInit, XF86VIDMODENAME, &noXFree86VidModeExtension },
+ #endif
+diff --git a/include/os.h b/include/os.h
+index 24ab2ba..43f4535 100644
+--- a/include/os.h
++++ b/include/os.h
+@@ -165,7 +165,7 @@ extern _X_EXPORT void MakeClientGrabPervious(ClientPtr /*client */ );
+ 
+ extern _X_EXPORT void ListenOnOpenFD(int /* fd */ , int /* noxauth */ );
+ 
+-extern _X_EXPORT Bool AddClientOnOpenFD(int /* fd */ );
++extern _X_EXPORT ClientPtr AddClientOnOpenFD(int /* fd */ );
+ 
+ #ifdef MONOTONIC_CLOCK
+ extern void ForceClockId(clockid_t /* forced_clockid */);
+diff --git a/os/connection.c b/os/connection.c
+index 8a28df6..544354c 100644
+--- a/os/connection.c
++++ b/os/connection.c
+@@ -1054,7 +1054,7 @@ ListenOnOpenFD(int fd, int noxauth)
+ }
+ 
+ /* based on TRANS(SocketUNIXAccept) (XtransConnInfo ciptr, int *status) */
+-Bool
++ClientPtr
+ AddClientOnOpenFD(int fd)
+ {
+     XtransConnInfo ciptr;
+@@ -1064,19 +1064,20 @@ AddClientOnOpenFD(int fd)
+     snprintf(port, sizeof(port), ":%d", atoi(display));
+     ciptr = _XSERVTransReopenCOTSServer(5, fd, port);
+     if (ciptr == NULL)
+-        return FALSE;
++        return NULL;
+ 
+     _XSERVTransSetOption(ciptr, TRANS_NONBLOCKING, 1);
+     ciptr->flags |= TRANS_NOXAUTH;
+ 
+     connect_time = GetTimeInMillis();
+ 
+-    if (!AllocNewConnection(ciptr, fd, connect_time)) {
++    ClientPtr client = AllocNewConnection(ciptr, fd, connect_time);
++    if (!client) {
+         ErrorConnMax(ciptr);
+-        return FALSE;
++        return NULL;
+     }
+ 
+-    return TRUE;
++    return client;
+ }
+ 
+ Bool

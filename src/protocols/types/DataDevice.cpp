@@ -28,6 +28,10 @@ uint32_t IDataSource::actions() {
     return 7; // all
 }
 
+uint32_t IDataSource::preferredDndAction() {
+    return WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+}
+
 void IDataSource::sendDndDropPerformed() {
     ;
 }

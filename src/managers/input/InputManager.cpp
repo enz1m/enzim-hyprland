@@ -1,4 +1,5 @@
 #include "InputManager.hpp"
+#include "../../xwayland/XWayland.hpp"
 #include <linux/input-event-codes.h>
 #include "../../desktop/view/window/WindowPresentation.hpp"
 #include "../../render/decorations/CHyprTitleBarDecoration.hpp"
@@ -433,7 +434,11 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus, bool mouse, st
 
     // if we are holding a pointer button,
     // and we're not dnd-ing, don't refocus. Keep focus on last surface.
-    if (!overridePos.has_value() && !PROTO::data->dndActive() && !m_currentlyHeldButtons.empty() && Desktop::focusState()->surface() &&
+    bool xDrag = false;
+#ifndef NO_XWAYLAND
+    xDrag = !overridePos && g_pXWayland && g_pXWayland->m_wm && g_pXWayland->m_wm->xDragActive();
+#endif
+    if (!xDrag && !overridePos.has_value() && !PROTO::data->dndActive() && !m_currentlyHeldButtons.empty() && Desktop::focusState()->surface() &&
         Desktop::focusState()->surface()->m_mapped && g_pSeatManager->m_state.pointerFocus && !m_hardInput) {
         foundSurface = g_pSeatManager->m_state.pointerFocus.lock();
 
@@ -599,6 +604,11 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus, bool mouse, st
 
     if (CURSOR_MONITOR && Pointer::mgr()->softwareLockedFor(CURSOR_MONITOR_REF) > 0 && !SKIP_CURSOR_FRAME_SCHEDULE)
         CURSOR_MONITOR->scheduleFrame(Aquamarine::IOutput::AQ_SCHEDULE_CURSOR_MOVE);
+
+#ifndef NO_XWAYLAND
+    if (xDrag && g_pXWayland->m_wm->routeXDragMotion(foundSurface, PMONITOR, mouseCoords, surfacePos == Vector2D(-1337, -1337) ? surfaceCoords : mouseCoords - surfacePos, time))
+        return;
+#endif
 
     // FIXME: This will be disabled during DnD operations because we do not exactly follow the spec
     // xdg-popup grabs should be keyboard-only, while they are absolute in our case...
@@ -798,16 +808,34 @@ void CInputManager::onMouseButton(IPointer::SButtonEvent e, SP<IPointer> mouse) 
 
     m_lastCursorMovement.reset();
 
+    SP<CWLSurfaceResource> pressOrigin;
     if (e.state == WL_POINTER_BUTTON_STATE_PRESSED) {
         m_currentlyHeldButtons.emplace_back(e.button, mouse);
     } else {
-        if (std::ranges::find_if(m_currentlyHeldButtons, [&](const auto& held) { return held.button == e.button && held.pointer.lock() == mouse; }) ==
-            m_currentlyHeldButtons.end()) {
+        const auto held = std::ranges::find_if(m_currentlyHeldButtons, [&](const auto& held) { return held.button == e.button && held.pointer.lock() == mouse; });
+        if (held == m_currentlyHeldButtons.end()) {
             Keybinds::mgr()->onMouseEvent(e, mouse);
             return;
         }
-        std::erase_if(m_currentlyHeldButtons, [&](const auto& held) { return held.button == e.button && held.pointer.lock() == mouse; });
+        pressOrigin = held->origin.lock();
+        m_currentlyHeldButtons.erase(held);
     }
+
+#ifndef NO_XWAYLAND
+    if (g_pXWayland && g_pXWayland->m_wm && g_pXWayland->m_wm->routeXDragButton(e, mouse, pressOrigin)) {
+        if (e.state == WL_POINTER_BUTTON_STATE_PRESSED)
+            m_currentlyHeldButtons.pop_back();
+        else {
+            if (m_currentlyHeldButtons.empty()) {
+                m_focusHeldByButtons   = false;
+                m_refocusHeldByButtons = false;
+            }
+            if (!g_pXWayland->m_wm->xDragActive())
+                simulateMouseMovement();
+        }
+        return;
+    }
+#endif
 
     switch (m_clickBehavior) {
         case CLICKMODE_DEFAULT: processMouseDownNormal(e, mouse); break;
@@ -980,6 +1008,12 @@ void CInputManager::processMouseDownNormal(const IPointer::SButtonEvent& e, SP<I
             break;
         }
         case WL_POINTER_BUTTON_STATE_RELEASED: break;
+    }
+
+    if (e.state == WL_POINTER_BUTTON_STATE_PRESSED && !PROTO::data->dndActive()) {
+        const auto held = std::ranges::find_if(m_currentlyHeldButtons, [&](const auto& held) { return held.button == e.button && held.pointer.lock() == mouse; });
+        if (held != m_currentlyHeldButtons.end())
+            held->origin = g_pSeatManager->m_state.pointerFocus;
     }
 
     // notify app if we didn't handle it
@@ -1623,6 +1657,10 @@ void CInputManager::destroyKeyboard(SP<IKeyboard> pKeyboard) {
 void CInputManager::destroyPointer(SP<IPointer> mouse) {
     LOG(Log::DEBUG, "Pointer at {:x} removed", rc<uintptr_t>(mouse.get()));
 
+#ifndef NO_XWAYLAND
+    if (g_pXWayland && g_pXWayland->m_wm)
+        g_pXWayland->m_wm->cancelXDragForPointer(mouse);
+#endif
     Keybinds::mgr()->onDeviceRemoved(mouse);
     for (auto it = m_currentlyHeldButtons.begin(); it != m_currentlyHeldButtons.end();) {
         if (it->pointer.lock() != mouse) {
@@ -2301,18 +2339,24 @@ std::string CInputManager::getNameForNewDevice(std::string internalName) {
 }
 
 void CInputManager::releaseAllMouseButtons() {
-    const auto buttonsCopy = m_currentlyHeldButtons;
+#ifndef NO_XWAYLAND
+    if (g_pXWayland && g_pXWayland->m_wm && g_pXWayland->m_wm->xDragBlocksNewDrag())
+        g_pXWayland->m_wm->cancelXDrag();
+#endif
 
     if (PROTO::data->dndActive())
         return;
 
+    const auto buttonsCopy = std::exchange(m_currentlyHeldButtons, {});
     for (auto const& mb : buttonsCopy) {
         const auto TIME = Time::millis(Time::steadyNow());
         if (!CHyprTitleBarDecoration::endContact({mb.pointer.lock().get(), mb.button}, std::nullopt, TIME, true))
             g_pSeatManager->sendPointerButton(TIME, mb.button, WL_POINTER_BUTTON_STATE_RELEASED);
     }
 
-    m_currentlyHeldButtons.clear();
+    m_focusHeldByButtons   = false;
+    m_refocusHeldByButtons = false;
+    g_pSeatManager->sendPointerFrame();
 }
 
 void CInputManager::setCursorIconOnBorder(PHLWINDOW w) {

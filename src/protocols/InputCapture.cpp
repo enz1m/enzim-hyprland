@@ -1,4 +1,5 @@
 #include "InputCapture.hpp"
+#include "../managers/input/InputManager.hpp"
 
 #include "Compositor.hpp"
 #include "config/ConfigValue.hpp"
@@ -220,6 +221,7 @@ bool CInputCaptureResource::activate(double x, double y, uint32_t borderId) {
     if (PERM != PERMISSION_RULE_ALLOW_MODE_ALLOW)
         return false;
 
+    g_pInputManager->releaseAllMouseButtons();
     m_activationId += 5;
     m_status = CLIENT_STATUS_ACTIVATED;
     LOG(Log::INFO, "[input-capture]({}) Input captured, activationId: {}, borderId: {}, x: {}, y: {}", m_sessionId.c_str(), m_activationId, borderId, x, y);

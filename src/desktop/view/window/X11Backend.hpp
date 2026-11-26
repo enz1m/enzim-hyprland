@@ -14,6 +14,7 @@ namespace Desktop::View {
 
         bool                   valid() const override;
         bool                   isMapped() const override;
+        bool                   isDragIcon() const;
         eBackendType           type() const override;
         pid_t                  pid() const override;
         SP<CWLSurfaceResource> surface() const override;

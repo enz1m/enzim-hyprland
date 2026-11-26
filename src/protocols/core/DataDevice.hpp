@@ -48,9 +48,15 @@ class CWLDataOfferResource : public IDataOffer {
     bool                             m_recvd    = false;
 
   private:
-    SP<CWlDataOffer> m_resource;
+    void                                             updateAction();
+
+    SP<CWlDataOffer>                                 m_resource;
+    uint32_t                                         m_destinationActions = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+    uint32_t                                         m_preferredAction    = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+    std::optional<wl_data_device_manager_dnd_action> m_selectedAction;
 
     friend class CWLDataDeviceResource;
+    friend class CWLDataDeviceProtocol;
 };
 
 class CWLDataSourceResource : public IDataSource {
@@ -186,18 +192,31 @@ class CWLDataDeviceProtocol : public IWaylandProtocol {
         CHyprSignalListener tabletTip;
     } m_dnd;
 
-    void abortDrag();
-    void initiateDrag(WP<CWLDataSourceResource> currentSource, SP<CWLSurfaceResource> dragSurface, SP<CWLSurfaceResource> origin);
-    void updateDrag();
-    void dropDrag();
-    void completeDrag();
-    void cleanupDndState(bool resetDevice, bool resetSource, bool simulateInput);
-    bool wasDragSuccessful();
+    struct {
+        WP<IDataDevice>          device;
+        WP<IDataSource>          source;
+        WP<CWLDataOfferResource> offer;
+    } m_xDnd;
+
+    void                     abortDrag();
+    void                     initiateDrag(WP<CWLDataSourceResource> currentSource, SP<CWLSurfaceResource> dragSurface, SP<CWLSurfaceResource> origin);
+    void                     updateDrag();
+    SP<CWLDataOfferResource> offerDragToSurface(SP<IDataDevice> device, SP<IDataSource> source, SP<CWLSurfaceResource> surface, const Vector2D& local);
+    uint32_t                 enterXDrag(SP<IDataSource> source, SP<CWLSurfaceResource> surface, const Vector2D& local);
+    void                     leaveXDrag();
+    void                     updateXDrag(uint32_t time, const Vector2D& local);
+    bool                     dropXDrag();
+    void                     dropDrag();
+    void                     completeDrag();
+    void                     cleanupDndState(bool resetDevice, bool resetSource, bool simulateInput);
+    bool                     wasDragSuccessful();
 
     //
     SP<IDataDevice> dataDeviceForClient(wl_client*);
 
     friend class CSeatManager;
+    friend class CX11Drag;
+    friend class CXWM;
     friend class CWLDataDeviceManagerResource;
     friend class CWLDataDeviceResource;
     friend class CWLDataSourceResource;

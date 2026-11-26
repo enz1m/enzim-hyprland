@@ -111,6 +111,8 @@ inline std::unordered_map<std::string, uint32_t> HYPRATOMS = {
     HYPRATOM("XdndFinished"),
     HYPRATOM("XdndProxy"),
     HYPRATOM("XdndTypeList"),
+    HYPRATOM("XdndActionList"),
+    HYPRATOM("_ENZIM_XDND_REVOKED"),
     HYPRATOM("XdndActionMove"),
     HYPRATOM("XdndActionCopy"),
     HYPRATOM("XdndActionAsk"),
@@ -126,6 +128,7 @@ inline std::unordered_map<std::string, uint32_t> HYPRATOMS = {
     HYPRATOM("TARGETS"),
     HYPRATOM("TIMESTAMP"),
     HYPRATOM("DELETE"),
+    HYPRATOM("NULL"),
     HYPRATOM("TEXT"),
     HYPRATOM("INCR"),
 #endif

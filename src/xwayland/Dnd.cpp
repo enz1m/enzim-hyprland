@@ -331,57 +331,6 @@ SP<CX11DataDevice> CX11DataDevice::getX11() {
     return m_self.lock();
 }
 
-std::vector<std::string> CX11DataSource::mimes() {
-    return m_mimeTypes;
-}
-
-void CX11DataSource::send(const std::string& mime, CFileDescriptor fd) {
-    ; // no-op
-}
-
-void CX11DataSource::accepted(const std::string& mime) {
-    ; // no-op
-}
-
-void CX11DataSource::cancelled() {
-    m_dndSuccess = false;
-    m_dropped    = false;
-}
-
-bool CX11DataSource::hasDnd() {
-    return m_dnd;
-}
-
-bool CX11DataSource::dndDone() {
-    return m_dropped;
-}
-
-void CX11DataSource::error(uint32_t code, const std::string& msg) {
-    LOG(Log::ERR, "CX11DataSource error: code {} msg {}", code, msg);
-    m_dndSuccess = false;
-    m_dropped    = false;
-}
-
-void CX11DataSource::sendDndFinished() {
-    m_dndSuccess = true;
-}
-
-uint32_t CX11DataSource::actions() {
-    return m_supportedActions;
-}
-
-eDataSourceType CX11DataSource::type() {
-    return DATA_SOURCE_TYPE_X11;
-}
-
-void CX11DataSource::sendDndDropPerformed() {
-    m_dropped = true;
-}
-
-void CX11DataSource::sendDndAction(wl_data_device_manager_dnd_action a) {
-    ; // no-op
-}
-
 void CX11DataDevice::forceCleanupDnd() {
 #ifndef NO_XWAYLAND
     if (m_dropTimeout)

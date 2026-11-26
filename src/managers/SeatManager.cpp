@@ -18,6 +18,7 @@
 #include "../desktop/view/LayerSurface.hpp"
 #include "../managers/input/InputManager.hpp"
 #include "../state/MonitorState.hpp"
+#include "../xwayland/XWayland.hpp"
 #include "devices/IHID.hpp"
 #include "wlr-layer-shell-unstable-v1.hpp"
 #include <algorithm>
@@ -852,6 +853,10 @@ void CSeatManager::setGrab(SP<CSeatGrab> grab) {
         return;
     }
 
+#ifndef NO_XWAYLAND
+    if (grab && g_pXWayland && g_pXWayland->m_wm && g_pXWayland->m_wm->xDragActive())
+        g_pInputManager->releaseAllMouseButtons();
+#endif
     if (m_seatGrab) {
         auto oldGrab = m_seatGrab;
 

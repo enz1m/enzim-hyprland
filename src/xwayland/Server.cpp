@@ -300,6 +300,14 @@ bool CXWaylandServer::create() {
     return true;
 }
 
+std::string CXWaylandServer::executable() {
+    std::error_code error;
+    const auto      companion = std::filesystem::read_symlink("/proc/self/exe", error).parent_path() / "Xwayland";
+    if (!error && access(companion.c_str(), X_OK) == 0)
+        return companion.string();
+    return "Xwayland";
+}
+
 void CXWaylandServer::runXWayland(CFileDescriptor& notifyFD) {
     if (!m_xFDs[0].setFlags(m_xFDs[0].getFlags() & ~FD_CLOEXEC) || !m_xFDs[1].setFlags(m_xFDs[1].getFlags() & ~FD_CLOEXEC) ||
         !m_waylandFDs[1].setFlags(m_waylandFDs[1].getFlags() & ~FD_CLOEXEC) || !m_xwmFDs[1].setFlags(m_xwmFDs[1].getFlags() & ~FD_CLOEXEC)) {
@@ -307,15 +315,17 @@ void CXWaylandServer::runXWayland(CFileDescriptor& notifyFD) {
         _exit(EXIT_FAILURE);
     }
 
-    auto cmd = std::format("exec Xwayland {} -rootless -core -listenfd {} -listenfd {} -displayfd {} -wm {}", m_displayName, m_xFDs[0].get(), m_xFDs[1].get(), notifyFD.get(),
-                           m_xwmFDs[1].get());
-
-    auto waylandSocket = std::format("{}", m_waylandFDs[1].get());
+    const auto executablePath = executable();
+    const auto listen1        = std::to_string(m_xFDs[0].get());
+    const auto listen2        = std::to_string(m_xFDs[1].get());
+    const auto display        = std::to_string(notifyFD.get());
+    const auto wm             = std::to_string(m_xwmFDs[1].get());
+    const auto waylandSocket  = std::to_string(m_waylandFDs[1].get());
     setenv("WAYLAND_SOCKET", waylandSocket.c_str(), true);
 
-    LOG(Log::DEBUG, "Starting XWayland with \"{}\", bon voyage!", cmd);
-
-    execl("/bin/sh", "/bin/sh", "-c", cmd.c_str(), nullptr);
+    LOG(Log::DEBUG, "Starting XWayland using {}", executablePath);
+    execlp(executablePath.c_str(), "Xwayland", m_displayName.c_str(), "-rootless", "-core", "-listenfd", listen1.c_str(), "-listenfd", listen2.c_str(), "-displayfd",
+           display.c_str(), "-wm", wm.c_str(), static_cast<char*>(nullptr));
 
     LOG(Log::ERR, "XWayland failed to open");
     _exit(1);

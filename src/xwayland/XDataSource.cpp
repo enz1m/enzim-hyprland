@@ -1,6 +1,7 @@
 #ifndef NO_XWAYLAND
 
 #include "XWayland.hpp"
+#include "../managers/eventLoop/EventLoopManager.hpp"
 #include "../defines.hpp"
 #include "../Compositor.hpp"
 #include "XDataSource.hpp"
@@ -65,42 +66,74 @@ void CXDataSource::send(const std::string& mime, CFileDescriptor fd) {
 
     LOG(Log::DEBUG, "[XDataSource] send with mime {} to fd {}", mime, fd.get());
 
-    const auto flags = fcntl(fd.get(), F_GETFL);
-    if (flags == -1 || fcntl(fd.get(), F_SETFL, flags | O_NONBLOCK) == -1)
+    auto&      wm        = *g_pXWayland->m_wm;
+    const auto selection = &m_selection == &wm.m_primarySelection ? HYPRATOMS["PRIMARY"] : HYPRATOMS["CLIPBOARD"];
+    wm.receiveSelection(m_selection, selection, mimeAtom, XCB_TIME_CURRENT_TIME, std::move(fd));
+}
+
+void CXWM::receiveSelection(SXSelection& selection, xcb_atom_t atom, xcb_atom_t target, xcb_timestamp_t time, CFileDescriptor fd, std::function<void(bool)> done,
+                            uint32_t generation) {
+    auto transfer = makeUnique<SXTransfer>(selection);
+    if (fd.isValid()) {
+        const auto flags = fcntl(fd.get(), F_GETFL);
+        if (flags != -1 && fcntl(fd.get(), F_SETFL, flags | O_NONBLOCK) != -1) {
+            transfer->wlFD        = std::move(fd);
+            transfer->eventSource = wl_event_loop_add_fd(
+                g_pCompositor->m_wlEventLoop, transfer->wlFD.get(), 0,
+                [](int, uint32_t mask, void* data) {
+                    auto* transfer = sc<SXTransfer*>(data);
+                    if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
+                        transfer->selection.removeTransfer(transfer->incomingWindow);
+                    else if (mask & WL_EVENT_WRITABLE)
+                        transfer->writeToWayland();
+                    return 0;
+                },
+                transfer.get());
+        }
+        if (!transfer->eventSource) {
+            if (done)
+                done(false);
+            return;
+        }
+    } else if (target != HYPRATOMS["DELETE"]) {
+        if (done)
+            done(false);
         return;
+    }
 
-    auto transfer         = makeUnique<SXTransfer>(m_selection);
-    transfer->wlFD        = std::move(fd);
-    transfer->eventSource = wl_event_loop_add_fd(
-        g_pCompositor->m_wlEventLoop, transfer->wlFD.get(), 0,
-        [](int, uint32_t mask, void* data) {
-            auto* transfer = sc<SXTransfer*>(data);
-            if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
-                transfer->selection.removeTransfer(transfer->incomingWindow);
-            else if (mask & WL_EVENT_WRITABLE)
-                transfer->writeToWayland();
-            return 0;
-        },
-        transfer.get());
-    if (!transfer->eventSource)
-        return;
+    const auto conn              = getConnection();
+    transfer->incomingWindow     = xcb_generate_id(conn);
+    transfer->incomingConnection = conn;
+    transfer->incomingTarget     = target;
+    transfer->incomingDone       = std::move(done);
+    const uint32_t mask          = XCB_EVENT_MASK_PROPERTY_CHANGE;
+    xcb_create_window(conn, XCB_COPY_FROM_PARENT, transfer->incomingWindow, m_screen->root, 0, 0, 1, 1, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT, m_screen->root_visual, XCB_CW_EVENT_MASK,
+                      &mask);
+    if (&selection == &m_dndSelection) {
+        // Keep authorization and conversion in one X server transaction.
+        xcb_grab_server(conn);
+        if (!guardXDragRequestor(transfer->incomingWindow, generation)) {
+            xcb_ungrab_server(conn);
+            xcb_flush(conn);
+            if (transfer->incomingDone)
+                transfer->incomingDone(false);
+            return;
+        }
+    }
+    xcb_convert_selection(conn, transfer->incomingWindow, atom, target, HYPRATOMS["_WL_SELECTION"], time);
+    if (&selection == &m_dndSelection) {
+        xcb_ungrab_server(conn);
+        const auto fail           = [&selection, requestor = transfer->incomingWindow](auto, auto) { selection.removeTransfer(requestor); };
+        transfer->incomingTimeout = makeShared<CEventLoopTimer>(std::chrono::seconds(10), fail, nullptr);
+        // Progress refreshes the idle timeout, so the budget bounds a steadily progressing source.
+        transfer->incomingBudget = makeShared<CEventLoopTimer>(std::chrono::minutes(2), fail, nullptr);
+        transfer->incomingLimit  = 1ULL << 30;
+        g_pEventLoopManager->addTimer(transfer->incomingTimeout);
+        g_pEventLoopManager->addTimer(transfer->incomingBudget);
+    }
+    xcb_flush(conn);
 
-    transfer->incomingWindow = xcb_generate_id(g_pXWayland->m_wm->getConnection());
-    const uint32_t MASK      = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY | XCB_EVENT_MASK_PROPERTY_CHANGE;
-    xcb_create_window(g_pXWayland->m_wm->getConnection(), XCB_COPY_FROM_PARENT, transfer->incomingWindow, g_pXWayland->m_wm->m_screen->root, 0, 0, 10, 10, 0,
-                      XCB_WINDOW_CLASS_INPUT_OUTPUT, g_pXWayland->m_wm->m_screen->root_visual, XCB_CW_EVENT_MASK, &MASK);
-
-    xcb_atom_t selection_atom = HYPRATOMS["CLIPBOARD"];
-    if (&m_selection == &g_pXWayland->m_wm->m_primarySelection)
-        selection_atom = HYPRATOMS["PRIMARY"];
-    else if (&m_selection == &g_pXWayland->m_wm->m_dndSelection)
-        selection_atom = HYPRATOMS["XdndSelection"];
-
-    xcb_convert_selection(g_pXWayland->m_wm->getConnection(), transfer->incomingWindow, selection_atom, mimeAtom, HYPRATOMS["_WL_SELECTION"], XCB_TIME_CURRENT_TIME);
-
-    xcb_flush(g_pXWayland->m_wm->getConnection());
-
-    m_selection.transfers.emplace_back(std::move(transfer));
+    selection.transfers.emplace_back(std::move(transfer));
 }
 
 void CXDataSource::accepted(const std::string& mime) {

@@ -18,7 +18,7 @@ CXWayland::CXWayland(const bool wantsEnabled) {
         return;
     }
 
-    if (!NFsUtils::executableExistsInPath("Xwayland")) {
+    if (CXWaylandServer::executable() == "Xwayland" && !NFsUtils::executableExistsInPath("Xwayland")) {
         // If Xwayland doesn't exist, don't try to start it.
         LOG(Log::DEBUG, "Unable to find XWayland; not starting it.");
         return;

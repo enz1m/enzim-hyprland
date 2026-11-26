@@ -271,7 +271,7 @@ class CXDGWMBase {
 
     bool                                    good();
     wl_client*                              client();
-    void                                    ping();
+    void                                    ping(uint32_t serial = 1337);
 
     std::vector<WP<CXDGPositionerResource>> m_positioners;
     std::vector<WP<CXDGSurfaceResource>>    m_surfaces;
@@ -279,7 +279,8 @@ class CXDGWMBase {
     WP<CXDGWMBase>                          m_self;
 
     struct {
-        CSignalT<> pong;
+        CSignalT<>         pong;
+        CSignalT<uint32_t> pongSerial;
     } m_events;
 
   private:
@@ -291,7 +292,8 @@ class CXDGShellProtocol : public IWaylandProtocol {
   public:
     CXDGShellProtocol(const wl_interface* iface, const int& ver, const std::string& name);
 
-    virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
+    virtual void   bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
+    SP<CXDGWMBase> wmBaseForClient(wl_client* client);
 
   private:
     void destroyResource(CXDGWMBase* resource);

@@ -10,6 +10,7 @@ struct wl_client;
 // TODO: add lazy mode
 class CXWaylandServer {
   public:
+    static std::string executable();
     CXWaylandServer();
     ~CXWaylandServer();
 

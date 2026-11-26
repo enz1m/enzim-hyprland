@@ -17,6 +17,7 @@
 #include "../protocols/core/Seat.hpp"
 #include "../managers/eventLoop/EventLoopManager.hpp"
 #include "../managers/SeatManager.hpp"
+#include "../managers/SessionLockManager.hpp"
 #include "../helpers/env/Env.hpp"
 #include "../protocols/XWaylandShell.hpp"
 #include "../protocols/core/Compositor.hpp"
@@ -68,6 +69,7 @@ void CXWM::handleCreate(xcb_create_notify_event_t* e) {
 
 void CXWM::handleDestroy(xcb_destroy_notify_event_t* e) {
     removeTransfersForWindow(e->window);
+    handleXDragWindowDestroyed(e->window);
 
     const auto XSURF = windowForXID(e->window);
 
@@ -212,7 +214,7 @@ std::string CXWM::getAtomName(uint32_t atom) {
 
 std::string enzuiAdmitAppId(const wl_client* client, std::string id);
 
-void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_reply_t* reply) {
+void        CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_reply_t* reply) {
     std::string propName;
     if (Env::isTrace())
         propName = getAtomName(atom);
@@ -437,6 +439,8 @@ void CXWM::handlePropertyNotify(xcb_property_notify_event_t* e) {
 }
 
 void CXWM::handleClientMessage(xcb_client_message_event_t* e) {
+    if (handleXDragMessage(*e))
+        return;
     if (e->window == m_dndSelection.window && (e->type == HYPRATOMS["XdndStatus"] || e->type == HYPRATOMS["XdndFinished"])) {
         m_dndDataDevice->handleReply(*e);
         return;
@@ -716,21 +720,39 @@ void CXWM::handleSelectionNotify(xcb_selection_notify_event_t* e) {
         return;
 
     auto& transfer = **it;
-    if (transfer.incremental || transfer.propertyReply)
+    if (transfer.incremental || transfer.propertyReply || e->target != transfer.incomingTarget)
         return;
 
-    if (e->property == XCB_ATOM_NONE || !transfer.getIncomingSelectionProp()) {
-        sel->transfers.erase(it);
+    if (e->property != HYPRATOMS["_WL_SELECTION"] || !transfer.getIncomingSelectionProp()) {
+        sel->removeTransfer(e->requestor);
+        return;
+    }
+
+    if (!transfer.wlFD.isValid()) {
+        const bool deleted =
+            transfer.propertyReply->type == HYPRATOMS["NULL"] && transfer.propertyReply->format == 8 && !transfer.propertyReply->value_len && !transfer.propertyReply->bytes_after;
+        if (deleted)
+            xcb_delete_property(getConnection(), e->requestor, e->property);
+        sel->removeTransfer(e->requestor, deleted);
         return;
     }
 
     if (transfer.propertyReply->type == HYPRATOMS["INCR"]) {
+        LOG(Log::TRACE, "[xwm] Reading INCR for selection {} target {}", e->selection, e->target);
+        if (transfer.propertyReply->format != 32 || transfer.propertyReply->value_len != 1 || transfer.propertyReply->bytes_after) {
+            sel->removeTransfer(e->requestor);
+            return;
+        }
+        transfer.incrMinimum = *sc<const uint32_t*>(xcb_get_property_value(transfer.propertyReply));
         transfer.incremental = true;
         transfer.acknowledgeChunk();
         return;
     }
 
-    transfer.writeToWayland();
+    if (transfer.validateIncomingSlice())
+        transfer.writeToWayland();
+    else
+        sel->removeTransfer(e->requestor);
 }
 
 bool CXWM::handleSelectionPropertyNotify(xcb_property_notify_event_t* e) {
@@ -740,10 +762,19 @@ bool CXWM::handleSelectionPropertyNotify(xcb_property_notify_event_t* e) {
             continue;
 
         auto& transfer = **it;
-        if (e->state == XCB_PROPERTY_NEW_VALUE && transfer.incremental && !transfer.propertyReply && e->atom == HYPRATOMS["_WL_SELECTION"]) {
-            if (!transfer.getIncomingSelectionProp() || xcb_get_property_value_length(transfer.propertyReply) == 0)
-                sel->transfers.erase(it);
-            else
+        if (e->state != XCB_PROPERTY_NEW_VALUE || e->atom != HYPRATOMS["_WL_SELECTION"])
+            return true;
+        if (transfer.propertyReply) {
+            sel->removeTransfer(e->window);
+        } else if (transfer.incremental) {
+            if (!transfer.getIncomingSelectionProp() || !transfer.validateIncomingSlice())
+                sel->removeTransfer(e->window);
+            else if (transfer.propertyReply->value_len == 0) {
+                // ICCCM makes the INCR marker a lower bound, so a shorter stream is truncated.
+                const bool complete = transfer.incomingBytes >= transfer.incrMinimum.value_or(0);
+                transfer.acknowledgeChunk();
+                sel->removeTransfer(e->window, complete);
+            } else
                 transfer.writeToWayland();
         }
         return true;
@@ -855,8 +886,10 @@ bool CXWM::handleSelectionXFixesNotify(xcb_xfixes_selection_notify_event_t* e) {
         return true;
     }
 
-    if (sel == &m_dndSelection)
+    if (sel == &m_dndSelection) {
+        handleXDragOwner(*e);
         return true;
+    }
 
     if (e->owner == XCB_WINDOW_NONE) {
         sel->owner = XCB_WINDOW_NONE;
@@ -1123,6 +1156,7 @@ CXWM::CXWM() : m_connection(makeUnique<CXCBConnection>(g_pXWayland->m_server->m_
 }
 
 CXWM::~CXWM() {
+    cancelXDrag();
 
     if (m_eventSource)
         wl_event_source_remove(m_eventSource);
@@ -1354,17 +1388,15 @@ void CXWM::initSelection() {
         XCB_XFIXES_SELECTION_EVENT_MASK_SET_SELECTION_OWNER | XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_WINDOW_DESTROY | XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_CLIENT_CLOSE;
 
     auto createSelectionWindow = [&](xcb_window_t& window, const std::string& atomName, bool inputOnly = false) {
-        window                = xcb_generate_id(getConnection());
-        const uint16_t width  = inputOnly ? 8192 : 10;
-        const uint16_t height = inputOnly ? 8192 : 10;
+        window                  = xcb_generate_id(getConnection());
+        const uint32_t values[] = {inputOnly, windowMask};
 
-        xcb_create_window(getConnection(), XCB_COPY_FROM_PARENT, window, m_screen->root, 0, 0, width, height, 0,
-                          inputOnly ? XCB_WINDOW_CLASS_INPUT_ONLY : XCB_WINDOW_CLASS_INPUT_OUTPUT, m_screen->root_visual, XCB_CW_EVENT_MASK, &windowMask);
+        xcb_create_window(getConnection(), XCB_COPY_FROM_PARENT, window, m_screen->root, 0, 0, 10, 10, 0, inputOnly ? XCB_WINDOW_CLASS_INPUT_ONLY : XCB_WINDOW_CLASS_INPUT_OUTPUT,
+                          XCB_COPY_FROM_PARENT, XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK, values);
 
-        if (!inputOnly) {
+        if (!inputOnly)
             xcb_set_selection_owner(getConnection(), window, HYPRATOMS[atomName], XCB_TIME_CURRENT_TIME);
-            xcb_xfixes_select_selection_input(getConnection(), window, HYPRATOMS[atomName], xfixesMask);
-        }
+        xcb_xfixes_select_selection_input(getConnection(), window, HYPRATOMS[atomName], xfixesMask);
 
         return window;
     };
@@ -1378,7 +1410,16 @@ void CXWM::initSelection() {
     m_primarySelection.listeners.setSelection        = g_pSeatManager->m_events.setPrimarySelection.listen([this] { m_primarySelection.onSelection(); });
     m_primarySelection.listeners.keyboardFocusChange = g_pSeatManager->m_events.keyboardFocusChange.listen([this] { m_primarySelection.onKeyboardFocus(); });
 
-    createSelectionWindow(m_dndSelection.window, "XdndAware", true);
+    createSelectionWindow(m_dndSelection.window, "XdndSelection", true);
+    m_xDragLock       = g_pSessionLockManager->m_events.lock.listen([this] {
+        if (!m_xDrag)
+            return;
+        cancelXDrag();
+        g_pInputManager->releaseAllMouseButtons();
+    });
+    m_xDragAuthorized = registerXDragProxy();
+    if (!m_xDragAuthorized)
+        LOG(Log::DEBUG, "[xwm] XWayland lacks authenticated inbound drag support");
     const uint32_t xdndVersion = XDND_VERSION;
     xcb_change_property(getConnection(), XCB_PROP_MODE_REPLACE, m_dndSelection.window, HYPRATOMS["XdndAware"], XCB_ATOM_ATOM, 32, 1, &xdndVersion);
 }
@@ -1629,12 +1670,13 @@ bool SXSelection::sendData(xcb_selection_request_event_t* e, std::string mime) {
 
 void SXTransfer::acknowledgeChunk() {
     free(propertyReply); // NOLINT(cppcoreguidelines-no-malloc)
-    propertyReply = nullptr;
-    propertyStart = 0;
+    propertyReply     = nullptr;
+    propertyStart     = 0;
+    propertyOffset    = 0;
+    propertyRemaining = 0;
     wl_event_source_fd_update(eventSource, 0);
-    auto conn = g_pXWayland->m_wm->getConnection();
-    xcb_delete_property(conn, incomingWindow, HYPRATOMS["_WL_SELECTION"]);
-    xcb_flush(conn);
+    xcb_delete_property(incomingConnection, incomingWindow, HYPRATOMS["_WL_SELECTION"]);
+    xcb_flush(incomingConnection);
 }
 
 void SXTransfer::writeToWayland() {
@@ -1646,18 +1688,44 @@ void SXTransfer::writeToWayland() {
         return;
     }
 
-    if (written >= 0 && written < remaining) {
+    if (written < 0) {
+        selection.removeTransfer(incomingWindow);
+        return;
+    }
+    if (written && incomingTimeout)
+        incomingTimeout->updateTimeout(std::chrono::seconds(10));
+    if (written < remaining) {
         propertyStart += written;
         wl_event_source_fd_update(eventSource, WL_EVENT_WRITABLE);
-    } else if (written >= 0 && incremental) {
-        // INCR owners can send the next chunk as soon as this property is deleted.
+        return;
+    }
+
+    if (propertyReply->bytes_after) {
+        propertyOffset += xcb_get_property_value_length(propertyReply) / 4;
+        propertyRemaining = propertyReply->bytes_after;
+        free(propertyReply); // NOLINT(cppcoreguidelines-no-malloc)
+        propertyReply = nullptr;
+        if (!getIncomingSelectionProp() || !validateIncomingSlice()) {
+            selection.removeTransfer(incomingWindow);
+            return;
+        }
+        wl_event_source_fd_update(eventSource, WL_EVENT_WRITABLE);
+    } else if (incremental)
         acknowledgeChunk();
-    } else
-        selection.removeTransfer(incomingWindow);
+    else {
+        xcb_delete_property(incomingConnection, incomingWindow, HYPRATOMS["_WL_SELECTION"]);
+        selection.removeTransfer(incomingWindow, true);
+    }
 }
 
-void SXSelection::removeTransfer(xcb_window_t window) {
-    std::erase_if(transfers, [window](const auto& t) { return t->incomingWindow == window; });
+void SXSelection::removeTransfer(xcb_window_t window, bool success) {
+    const auto it = std::ranges::find_if(transfers, [window](const auto& transfer) { return transfer->incomingWindow == window; });
+    if (it == transfers.end())
+        return;
+    auto done = std::move((*it)->incomingDone);
+    transfers.erase(it);
+    if (done)
+        done(success);
 }
 
 void CXWM::removeTransfersForWindow(xcb_window_t window) {
@@ -1667,28 +1735,50 @@ void CXWM::removeTransfersForWindow(xcb_window_t window) {
 }
 
 SXTransfer::~SXTransfer() {
+    if (incomingTimeout)
+        g_pEventLoopManager->removeTimer(incomingTimeout);
+    if (incomingBudget)
+        g_pEventLoopManager->removeTimer(incomingBudget);
     if (eventSource)
         wl_event_source_remove(eventSource);
     if (incomingWindow)
-        xcb_destroy_window(*g_pXWayland->m_wm->m_connection, incomingWindow);
+        xcb_destroy_window(incomingConnection, incomingWindow);
     if (propertyReply)
         free(propertyReply); // NOLINT(cppcoreguidelines-no-malloc)
 }
 
 bool SXTransfer::getIncomingSelectionProp() {
-    constexpr uint32_t        MAX_PROPERTY_WORDS = 8 * 1024 * 1024;
+    constexpr uint32_t        SLICE_WORDS = 16 * 1024;
     xcb_get_property_cookie_t cookie =
-        xcb_get_property(*g_pXWayland->m_wm->m_connection, false, incomingWindow, HYPRATOMS["_WL_SELECTION"], XCB_GET_PROPERTY_TYPE_ANY, 0, MAX_PROPERTY_WORDS);
+        xcb_get_property(incomingConnection, false, incomingWindow, HYPRATOMS["_WL_SELECTION"], XCB_GET_PROPERTY_TYPE_ANY, propertyOffset, SLICE_WORDS);
 
     propertyStart = 0;
-    propertyReply = xcb_get_property_reply(*g_pXWayland->m_wm->m_connection, cookie, nullptr);
+    propertyReply = xcb_get_property_reply(incomingConnection, cookie, nullptr);
 
     if (!propertyReply) {
         LOG(Log::ERR, "[SXTransfer] couldn't get a prop reply");
         return false;
     }
 
-    return propertyReply->type != XCB_ATOM_NONE && propertyReply->bytes_after == 0;
+    return propertyReply->type != XCB_ATOM_NONE;
+}
+
+bool SXTransfer::validateIncomingSlice() {
+    const auto* reply = propertyReply;
+    if (reply->type == HYPRATOMS["INCR"] || (reply->format != 8 && reply->format != 16 && reply->format != 32))
+        return false;
+    const uint32_t bytes = xcb_get_property_value_length(reply);
+    if ((reply->bytes_after && (!bytes || bytes % 4)) || (propertyOffset && (bytes > propertyRemaining || reply->bytes_after != propertyRemaining - bytes)))
+        return false;
+    if (incomingType != XCB_ATOM_NONE && (reply->type != incomingType || reply->format != incomingFormat))
+        return false;
+    if (__builtin_add_overflow(incomingBytes, bytes, &incomingBytes) || (incomingLimit && incomingBytes > incomingLimit))
+        return false;
+    incomingType   = reply->type;
+    incomingFormat = reply->format;
+    if (incomingTimeout)
+        incomingTimeout->updateTimeout(std::chrono::seconds(10));
+    return true;
 }
 
 #endif

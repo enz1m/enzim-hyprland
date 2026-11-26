@@ -231,6 +231,11 @@ bool CX11Backend::isMapped() const {
     return m_mapped;
 }
 
+bool CX11Backend::isDragIcon() const {
+    const auto surface = m_xwaylandSurface.lock();
+    return surface && std::ranges::contains(surface->m_atoms, HYPRATOMS["_NET_WM_WINDOW_TYPE_DND"]);
+}
+
 eBackendType CX11Backend::type() const {
     return eBackendType::WINDOW_BACKEND_X11;
 }

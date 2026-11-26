@@ -28,32 +28,6 @@ class CX11DataOffer : public IDataOffer {
     WP<CX11DataOffer>                m_self;
 };
 
-class CX11DataSource : public IDataSource {
-  public:
-    CX11DataSource()  = default;
-    ~CX11DataSource() = default;
-
-    virtual std::vector<std::string> mimes();
-    virtual void                     send(const std::string& mime, Hyprutils::OS::CFileDescriptor fd);
-    virtual void                     accepted(const std::string& mime);
-    virtual void                     cancelled();
-    virtual bool                     hasDnd();
-    virtual bool                     dndDone();
-    virtual void                     error(uint32_t code, const std::string& msg);
-    virtual void                     sendDndFinished();
-    virtual uint32_t                 actions(); // wl_data_device_manager.dnd_action
-    virtual eDataSourceType          type();
-    virtual void                     sendDndDropPerformed();
-    virtual void                     sendDndAction(wl_data_device_manager_dnd_action a);
-
-    bool                             m_dnd        = true;
-    bool                             m_dndSuccess = false;
-    bool                             m_dropped    = false;
-
-    std::vector<std::string>         m_mimeTypes;
-    uint32_t                         m_supportedActions = 0;
-};
-
 class CX11DataDevice : public IDataDevice {
   public:
     CX11DataDevice() = default;
@@ -77,13 +51,13 @@ class CX11DataDevice : public IDataDevice {
     void            handleReply(const xcb_client_message_event_t& event);
 #endif
 
-    WP<CX11DataDevice>                m_self;
+    WP<CX11DataDevice> m_self;
 
   private:
     void cleanupState();
 #ifndef NO_XWAYLAND
     void                              finishDrop(bool success);
-    xcb_window_t getProxyWindow(xcb_window_t window);
+    xcb_window_t                      getProxyWindow(xcb_window_t window);
     void                              sendDndEvent(xcb_atom_t type, xcb_client_message_data_t& data);
     xcb_window_t                      m_target  = XCB_WINDOW_NONE;
     xcb_window_t                      m_proxy   = XCB_WINDOW_NONE;

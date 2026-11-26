@@ -4,6 +4,7 @@
 #include "Dnd.hpp"
 #include "../helpers/memory/Memory.hpp"
 #include "../helpers/signal/Signal.hpp"
+#include "../helpers/time/Time.hpp"
 
 #include <xcb/xcb.h>
 #include <xcb/res.h>
@@ -13,10 +14,14 @@
 #include <hyprutils/os/FileDescriptor.hpp>
 #include <cinttypes> // for PRIxPTR
 #include <cstdint>
+#include <functional>
+#include <optional>
 
 struct wl_event_source;
 class CXWaylandSurfaceResource;
 struct SXSelection;
+class CX11Drag;
+class CEventLoopTimer;
 
 struct SXTransfer {
     ~SXTransfer();
@@ -35,11 +40,24 @@ struct SXTransfer {
 
     xcb_selection_request_event_t  request;
 
-    int                            propertyStart  = 0;
-    xcb_get_property_reply_t*      propertyReply  = nullptr;
-    xcb_window_t                   incomingWindow = 0;
+    int                            propertyStart     = 0;
+    uint32_t                       propertyOffset    = 0;
+    uint32_t                       propertyRemaining = 0;
+    uint64_t                       incomingBytes     = 0;
+    uint64_t                       incomingLimit     = 0;
+    std::optional<uint64_t>        incrMinimum;
+    xcb_atom_t                     incomingType   = XCB_ATOM_NONE;
+    uint8_t                        incomingFormat = 0;
+    SP<CEventLoopTimer>            incomingTimeout;
+    SP<CEventLoopTimer>            incomingBudget;
+    xcb_get_property_reply_t*      propertyReply      = nullptr;
+    xcb_window_t                   incomingWindow     = 0;
+    xcb_connection_t*              incomingConnection = nullptr;
+    xcb_atom_t                     incomingTarget     = XCB_ATOM_NONE;
+    std::function<void(bool)>      incomingDone;
 
     bool                           getIncomingSelectionProp();
+    bool                           validateIncomingSlice();
     void                           acknowledgeChunk();
     void                           writeToWayland();
 };
@@ -55,7 +73,7 @@ struct SXSelection {
     void             onKeyboardFocus();
     bool             sendData(xcb_selection_request_event_t* e, std::string mime);
     int              onRead(int fd, uint32_t mask);
-    void             removeTransfer(xcb_window_t window);
+    void             removeTransfer(xcb_window_t window, bool success = false);
 
     struct {
         CHyprSignalListener setSelection;
@@ -118,28 +136,62 @@ class CXWM {
 
     int                onEvent(int fd, uint32_t mask);
     SP<CX11DataDevice> getDataDevice();
+    bool               xDragActive() const;
+    bool               xDragBlocksNewDrag() const;
+    bool               routeXDragMotion(SP<CWLSurfaceResource> surface, PHLMONITOR monitor, const Vector2D& point, const Vector2D& local, uint32_t time);
+    bool               routeXDragButton(const IPointer::SButtonEvent& event, SP<IPointer> mouse, SP<CWLSurfaceResource> pressOrigin);
+    void               cancelXDragForPointer(SP<IPointer> pointer);
+    void               cancelXDrag();
     void               updateWorkArea(int x, int y, int w, int h);
 
   private:
-    void                 setCursor(unsigned char* pixData, uint32_t stride, const Vector2D& size, const Vector2D& hotspot);
+    void setCursor(unsigned char* pixData, uint32_t stride, const Vector2D& size, const Vector2D& hotspot);
 
-    void                 gatherResources();
-    void                 getVisual();
-    void                 getRenderFormat();
-    void                 createWMWindow();
-    void                 initSelection();
+    void gatherResources();
+    void getVisual();
+    void getRenderFormat();
+    void createWMWindow();
+    void initSelection();
+    void endXDrag(bool success, bool notifySource = true);
+    struct SXDragClaim {
+        xcb_window_t owner      = XCB_WINDOW_NONE;
+        uint32_t     serial     = 0;
+        uint32_t     generation = 0;
+        uint32_t     button     = 0;
+        uint32_t     released   = 0;
+        uint32_t     timestamp  = 0;
+    };
+    bool        registerXDragProxy();
+    SXDragClaim xDragClaim();
+    bool        guardXDragRequestor(xcb_window_t requestor, uint32_t generation);
+    bool        m_xDragAuthorized = false;
+    struct SXDragReceipt {
+        xcb_window_t    source     = XCB_WINDOW_NONE;
+        xcb_window_t    owner      = XCB_WINDOW_NONE;
+        uint32_t        generation = 0;
+        Time::steady_tp expires;
+    };
+    // A cancelled hover owes its X source one failed XdndFinished if the source still drops.
+    std::optional<SXDragReceipt> m_xDragReceipt;
+    bool                         answerCancelledDrop(const xcb_client_message_event_t& event);
 
-    void                 onNewSurface(SP<CWLSurfaceResource> surf);
-    void                 onNewResource(SP<CXWaylandSurfaceResource> resource);
+    void                         handleXDragOwner(const xcb_xfixes_selection_notify_event_t& event);
+    bool                         handleXDragMessage(const xcb_client_message_event_t& event);
+    void                         handleXDragWindowDestroyed(xcb_window_t window);
+    void receiveSelection(SXSelection& selection, xcb_atom_t atom, xcb_atom_t target, xcb_timestamp_t time, Hyprutils::OS::CFileDescriptor fd, std::function<void(bool)> done = {},
+                          uint32_t generation = 0);
 
-    void                 setActiveWindow(xcb_window_t window);
-    void                 sendState(SP<CXWaylandSurface> surf);
-    void                 focusWindow(SP<CXWaylandSurface> surf);
-    void                 activateSurface(SP<CXWaylandSurface> surf, bool activate);
-    bool                 isWMWindow(xcb_window_t w);
-    void                 updateOverrideRedirect(SP<CXWaylandSurface> surf, bool overrideRedirect);
+    void onNewSurface(SP<CWLSurfaceResource> surf);
+    void onNewResource(SP<CXWaylandSurfaceResource> resource);
 
-    void                 sendWMMessage(SP<CXWaylandSurface> surf, xcb_client_message_data_t* data, uint32_t mask);
+    void setActiveWindow(xcb_window_t window);
+    void sendState(SP<CXWaylandSurface> surf);
+    void focusWindow(SP<CXWaylandSurface> surf);
+    void activateSurface(SP<CXWaylandSurface> surf, bool activate);
+    bool isWMWindow(xcb_window_t w);
+    void updateOverrideRedirect(SP<CXWaylandSurface> surf, bool overrideRedirect);
+
+    void sendWMMessage(SP<CXWaylandSurface> surf, xcb_client_message_data_t* data, uint32_t mask);
 
     SP<CXWaylandSurface> windowForXID(xcb_window_t wid);
     SP<CXWaylandSurface> windowForWayland(SP<CWLSurfaceResource> surf);
@@ -211,6 +263,8 @@ class CXWM {
     SXSelection                               m_clipboard;
     SXSelection                               m_primarySelection;
     SXSelection                               m_dndSelection;
+    SP<CX11Drag>                              m_xDrag;
+    CHyprSignalListener                       m_xDragLock;
     SP<CX11DataDevice>                        m_dndDataDevice = makeShared<CX11DataDevice>();
 
     inline xcb_connection_t*                  getConnection() {
@@ -225,7 +279,7 @@ class CXWM {
     friend class CXWayland;
     friend class CXDataSource;
     friend class CX11DataDevice;
-    friend class CX11DataSource;
+    friend class CX11Drag;
     friend class CX11DataOffer;
     friend class CWLDataDeviceProtocol;
     friend struct SXSelection;

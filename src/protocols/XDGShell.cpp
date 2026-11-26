@@ -998,7 +998,10 @@ CXDGWMBase::CXDGWMBase(SP<CXdgWmBase> resource_) : m_resource(resource_) {
         LOG(Log::DEBUG, "New xdg_surface at {:x}", (uintptr_t)RESOURCE.get());
     });
 
-    m_resource->setPong([this](CXdgWmBase* r, uint32_t serial) { m_events.pong.emit(); });
+    m_resource->setPong([this](CXdgWmBase* r, uint32_t serial) {
+        m_events.pong.emit();
+        m_events.pongSerial.emit(serial);
+    });
 }
 
 bool CXDGWMBase::good() {
@@ -1009,8 +1012,13 @@ wl_client* CXDGWMBase::client() {
     return m_client;
 }
 
-void CXDGWMBase::ping() {
-    m_resource->sendPing(1337);
+void CXDGWMBase::ping(uint32_t serial) {
+    m_resource->sendPing(serial);
+}
+
+SP<CXDGWMBase> CXDGShellProtocol::wmBaseForClient(wl_client* client) {
+    const auto it = std::ranges::find_if(m_wmBases, [client](const auto& base) { return base->good() && base->client() == client; });
+    return it == m_wmBases.end() ? nullptr : *it;
 }
 
 CXDGShellProtocol::CXDGShellProtocol(const wl_interface* iface, const int& ver, const std::string& name) : IWaylandProtocol(iface, ver, name) {

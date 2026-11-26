@@ -274,9 +274,12 @@ class CInputManager {
     bool m_focusHeldByButtons   = false;
     bool m_refocusHeldByButtons = false;
 
+    friend class CXWM;
+
     struct SHeldPointerButton {
-        uint32_t     button = 0;
-        WP<IPointer> pointer;
+        uint32_t               button = 0;
+        WP<IPointer>           pointer;
+        WP<CWLSurfaceResource> origin;
     };
 
     // for releasing mouse buttons

@@ -37,11 +37,12 @@ CWLDataOfferResource::CWLDataOfferResource(SP<CWlDataOffer> resource_, SP<IDataS
 
         LOG(Log::DEBUG, "Offer {:x} accepts data from source {:x} with mime {}", (uintptr_t)this, (uintptr_t)m_source.get(), mime ? mime : "null");
 
-        m_source->accepted(mime ? mime : "");
-        m_accepted = mime;
+        const auto source = m_source.lock();
+        m_accepted        = mime;
+        source->accepted(mime ? mime : "");
     });
 
-    m_resource->setSetActions([this, previous = std::optional<wl_data_device_manager_dnd_action>{}](CWlDataOffer* r, uint32_t actions, uint32_t preferred) mutable {
+    m_resource->setSetActions([this](CWlDataOffer* r, uint32_t actions, uint32_t preferred) {
         constexpr uint32_t COPY = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
         constexpr uint32_t MOVE = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
         constexpr uint32_t ASK  = WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK;
@@ -54,24 +55,24 @@ CWLDataOfferResource::CWLDataOfferResource(SP<CWlDataOffer> resource_, SP<IDataS
             return;
         }
 
-        const auto source = m_source.lock();
-        if (!source || !source->hasDnd() || m_dead)
-            return;
-
-        const auto allowed  = source->actions() & actions & (COPY | MOVE);
-        const auto selected = sc<wl_data_device_manager_dnd_action>((preferred & allowed) ? preferred : (allowed & COPY) ? COPY : (allowed & MOVE));
-        if (previous == selected)
-            return;
-
-        previous = selected;
-        r->sendAction(selected);
-        source->sendDndAction(selected);
+        m_destinationActions = actions;
+        m_preferredAction    = preferred;
+        updateAction();
     });
 
     m_resource->setReceive([this](CWlDataOffer* r, const char* mime, int fd) {
         CFileDescriptor sendFd{fd};
         if (!m_source) {
             LOG(Log::WARN, "Possible bug: Receive on an offer w/o a source");
+            return;
+        }
+
+        const auto source = m_source.lock();
+        if (source->type() == DATA_SOURCE_TYPE_X11 && source->hasDnd()) {
+            if (!m_dead) {
+                m_recvd = true;
+                source->send(mime ? mime : "", std::move(sendFd));
+            }
             return;
         }
 
@@ -96,7 +97,16 @@ CWLDataOfferResource::CWLDataOfferResource(SP<CWlDataOffer> resource_, SP<IDataS
     });
 
     m_resource->setFinish([this](CWlDataOffer* r) {
+        if (m_dead)
+            return;
         m_dead = true;
+        if (const auto source = m_source.lock(); source && source->type() == DATA_SOURCE_TYPE_X11) {
+            if (source->dndDone() && m_recvd && m_accepted)
+                source->sendDndFinished();
+            else
+                source->cancelled();
+            return;
+        }
         if (!m_source || !m_recvd || !m_accepted)
             PROTO::data->abortDrag();
         else
@@ -105,10 +115,32 @@ CWLDataOfferResource::CWLDataOfferResource(SP<CWlDataOffer> resource_, SP<IDataS
 }
 
 CWLDataOfferResource::~CWLDataOfferResource() {
-    if (!m_source || !m_source->hasDnd() || m_dead)
+    const auto source = m_source.lock();
+    if (!source || !source->hasDnd() || m_dead)
         return;
 
-    m_source->sendDndFinished();
+    if (source->type() != DATA_SOURCE_TYPE_X11)
+        source->sendDndFinished();
+}
+
+void CWLDataOfferResource::updateAction() {
+    const auto source = m_source.lock();
+    if (!source || !source->hasDnd() || m_dead || (source->type() == DATA_SOURCE_TYPE_X11 && source->dndDone()))
+        return;
+
+    constexpr uint32_t COPY      = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+    constexpr uint32_t MOVE      = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+    const auto         allowed   = source->actions() & m_destinationActions & (COPY | MOVE);
+    const auto         requested = source->preferredDndAction();
+    const auto         preferred = (requested & allowed) ? requested : m_preferredAction;
+    const auto         selected  = sc<wl_data_device_manager_dnd_action>((preferred & allowed) ? preferred : (allowed & COPY) ? COPY : (allowed & MOVE));
+    if (m_selectedAction == selected)
+        return;
+
+    m_selectedAction = selected;
+    if (m_resource->version() >= 3)
+        m_resource->sendAction(selected);
+    source->sendDndAction(selected);
 }
 
 bool CWLDataOfferResource::good() {
@@ -121,7 +153,14 @@ void CWLDataOfferResource::sendData() {
 
     const auto SOURCEACTIONS = m_source->actions();
 
-    if (m_resource->version() >= 3 && SOURCEACTIONS > 0) {
+    if (m_source->type() == DATA_SOURCE_TYPE_X11 && m_source->hasDnd()) {
+        if (m_resource->version() >= 3) {
+            m_destinationActions = 0;
+            m_preferredAction    = 0;
+            m_resource->sendSourceActions(SOURCEACTIONS);
+        } else
+            updateAction();
+    } else if (m_resource->version() >= 3 && SOURCEACTIONS > 0) {
         m_resource->sendSourceActions(SOURCEACTIONS);
         if (SOURCEACTIONS & WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE)
             m_resource->sendAction(WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
@@ -289,6 +328,16 @@ CWLDataDeviceResource::CWLDataDeviceResource(SP<CWlDataDevice> resource_) : m_re
     });
 
     m_resource->setStartDrag([](CWlDataDevice* r, wl_resource* sourceR, wl_resource* origin, wl_resource* icon, uint32_t serial) {
+        const auto originSurface = origin ? CWLSurfaceResource::fromResource(origin) : nullptr;
+#ifndef NO_XWAYLAND
+        if (g_pXWayland && g_pXWayland->m_wm && g_pXWayland->m_wm->xDragBlocksNewDrag()) {
+            const auto seat = g_pSeatManager->m_state.pointerFocusResource.lock();
+            if (g_pXWayland->m_wm->xDragActive() || !originSurface || originSurface->client() != r->client() ||
+                !g_pSeatManager->pointerButtonSerialValid(seat, serial, originSurface, false))
+                return;
+            g_pXWayland->m_wm->cancelXDrag();
+        }
+#endif
         auto source = CWLDataSourceResource::fromResource(sourceR);
         if (!source) {
             LOG(Log::ERR, "No source in drag");
@@ -302,7 +351,7 @@ CWLDataDeviceResource::CWLDataDeviceResource(SP<CWlDataDevice> resource_) : m_re
 
         source->m_dnd = true;
 
-        PROTO::data->initiateDrag(source, icon ? CWLSurfaceResource::fromResource(icon) : nullptr, CWLSurfaceResource::fromResource(origin));
+        PROTO::data->initiateDrag(source, icon ? CWLSurfaceResource::fromResource(icon) : nullptr, originSurface);
     });
 }
 
@@ -442,6 +491,11 @@ void CWLDataDeviceProtocol::destroyResource(CWLDataDeviceManagerResource* seat) 
 }
 
 void CWLDataDeviceProtocol::destroyResource(CWLDataDeviceResource* resource) {
+    if (m_xDnd.device.get() == resource) {
+        m_xDnd.device.reset();
+        if (const auto source = m_xDnd.source.lock())
+            source->cancelled();
+    }
     std::erase_if(m_devices, [&](const auto& other) { return other.get() == resource; });
 }
 
@@ -450,6 +504,15 @@ void CWLDataDeviceProtocol::destroyResource(CWLDataSourceResource* resource) {
 }
 
 void CWLDataDeviceProtocol::destroyResource(CWLDataOfferResource* resource) {
+    if (m_xDnd.offer.get() == resource && !resource->m_dead) {
+        resource->m_dead = true;
+        if (const auto source = resource->m_source.lock()) {
+            if (resource->m_resource->version() < 3 && resource->m_recvd && source->dndDone())
+                source->sendDndFinished();
+            else
+                source->cancelled();
+        }
+    }
     std::erase_if(m_offers, [&](const auto& other) { return other.get() == resource; });
 }
 
@@ -572,7 +635,7 @@ void CWLDataDeviceProtocol::onKeyboardFocus() {
 
 void CWLDataDeviceProtocol::onDndPointerFocus() {
     for (auto const& o : m_offers) {
-        if (o->m_source && !o->m_source->hasDnd())
+        if (m_xDnd.offer == o || (o->m_source && !o->m_source->hasDnd()))
             continue;
         o->m_dead = true;
     }
@@ -697,52 +760,85 @@ void CWLDataDeviceProtocol::updateDrag() {
         m_dnd.focusedDevice->sendLeave();
     m_dnd.focusedDevice.reset();
 
-    auto surface = g_pSeatManager->m_state.dndPointerFocus.lock();
+    const auto surface = g_pSeatManager->m_state.dndPointerFocus.lock();
     if (!surface)
         return;
-
     m_dnd.focusedDevice = dataDeviceForClient(surface->client());
+    if (const auto device = m_dnd.focusedDevice.lock())
+        offerDragToSurface(device, m_dnd.currentSource.lock(), surface, surface->m_current.size / 2.F);
+}
 
-    if (!m_dnd.focusedDevice)
+uint32_t CWLDataDeviceProtocol::enterXDrag(SP<IDataSource> source, SP<CWLSurfaceResource> surface, const Vector2D& local) {
+    const auto device = dataDeviceForClient(surface->client());
+    if (!device || !device->getWayland())
+        return 0;
+
+    const auto offer = offerDragToSurface(device, source, surface, local);
+    if (!offer)
+        return 0;
+    m_xDnd = {device, source, offer};
+    return offer->m_resource->version();
+}
+
+void CWLDataDeviceProtocol::leaveXDrag() {
+    if (m_xDnd.offer)
+        m_xDnd.offer->m_dead = true;
+    const auto source = m_xDnd.source.lock();
+    if (m_xDnd.device && source && !source->dndDone())
+        m_xDnd.device->sendLeave();
+    m_xDnd = {};
+}
+
+void CWLDataDeviceProtocol::updateXDrag(uint32_t time, const Vector2D& local) {
+    if (!m_xDnd.offer || !m_xDnd.device)
         return;
+    m_xDnd.offer->updateAction();
+    m_xDnd.device->sendMotion(time, local);
+}
 
+bool CWLDataDeviceProtocol::dropXDrag() {
+    if (!m_xDnd.offer || !m_xDnd.device)
+        return false;
+    m_xDnd.device->sendDrop();
+    return true;
+}
+
+SP<CWLDataOfferResource> CWLDataDeviceProtocol::offerDragToSurface(SP<IDataDevice> device, SP<IDataSource> source, SP<CWLSurfaceResource> surface, const Vector2D& local) {
     SP<IDataOffer> offer;
 
-    if (const auto WL = m_dnd.focusedDevice->getWayland(); WL) {
-        const auto OFFER =
-            m_offers.emplace_back(makeShared<CWLDataOfferResource>(makeShared<CWlDataOffer>(WL->m_resource->client(), WL->m_resource->version(), 0), m_dnd.currentSource.lock()));
+    if (const auto WL = device->getWayland(); WL) {
+        const auto OFFER = m_offers.emplace_back(makeShared<CWLDataOfferResource>(makeShared<CWlDataOffer>(WL->m_resource->client(), WL->m_resource->version(), 0), source));
         if (!OFFER->good()) {
             WL->m_resource->noMemory();
             m_offers.pop_back();
-            return;
+            return nullptr;
         }
-        OFFER->m_source = m_dnd.currentSource;
+        OFFER->m_source = source;
         OFFER->m_self   = OFFER;
         offer           = OFFER;
     }
 #ifndef NO_XWAYLAND
-    else if (m_dnd.focusedDevice->getX11()) {
+    else if (device->getX11()) {
         const auto xOffer = makeShared<CX11DataOffer>();
         xOffer->m_self    = xOffer;
-        xOffer->m_source  = m_dnd.currentSource;
+        xOffer->m_source  = source;
         offer             = xOffer;
     }
 #endif
 
     if (!offer) {
         LOG(Log::ERR, "No offer could be created in updateDrag");
-        return;
+        return nullptr;
     }
 
-    LOG(Log::DEBUG, "New {} dnd offer {:x} for data source {:x}", offer->type() == DATA_SOURCE_TYPE_WAYLAND ? "wayland" : "X11", (uintptr_t)offer.get(),
-        (uintptr_t)m_dnd.currentSource.get());
+    LOG(Log::DEBUG, "New {} dnd offer {:x} for data source {:x}", offer->type() == DATA_SOURCE_TYPE_WAYLAND ? "wayland" : "X11", (uintptr_t)offer.get(), (uintptr_t)source.get());
 
-    m_dnd.focusedDevice->sendDataOffer(offer);
+    device->sendDataOffer(offer);
     if (const auto WL = offer->getWayland(); WL)
         WL->sendData();
-    m_dnd.focusedDevice->sendEnter(wl_display_next_serial(g_pCompositor->m_wlDisplay), surface, surface->m_current.size / 2.F, offer);
+    device->sendEnter(wl_display_next_serial(g_pCompositor->m_wlDisplay), surface, local, offer);
 #ifndef NO_XWAYLAND
-    if (const auto x11 = m_dnd.focusedDevice->getX11()) {
+    if (const auto x11 = device->getX11()) {
         const auto view = Desktop::View::CWLSurface::fromResource(surface);
         if (const auto box = view ? view->getSurfaceBoxGlobal() : std::nullopt; box) {
             const auto point = m_dnd.touchPos.value_or(g_pInputManager->getMouseCoordsInternal());
@@ -750,6 +846,7 @@ void CWLDataDeviceProtocol::updateDrag() {
         }
     }
 #endif
+    return offer->getWayland();
 }
 
 void CWLDataDeviceProtocol::cleanupDndState(bool resetDevice, bool resetSource, bool simulateInput) {
@@ -893,6 +990,10 @@ bool CWLDataDeviceProtocol::dndActive() {
 }
 
 void CWLDataDeviceProtocol::abortDndIfPresent() {
+#ifndef NO_XWAYLAND
+    if (g_pXWayland && g_pXWayland->m_wm)
+        g_pXWayland->m_wm->cancelXDrag();
+#endif
     if (!dndActive())
         return;
     abortDrag();

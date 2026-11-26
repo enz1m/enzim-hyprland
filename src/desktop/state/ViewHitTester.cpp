@@ -4,6 +4,7 @@
 #include "../view/LayerSurface.hpp"
 #include "../view/WLSurface.hpp"
 #include "../view/window/Window.hpp"
+#include "../view/window/X11Backend.hpp"
 #include "../../config/ConfigValue.hpp"
 #include "../../layout/space/Space.hpp"
 #include "../../macros.hpp"
@@ -57,8 +58,13 @@ PHLWINDOW CViewHitTester::windowAtInternal(const Vector2D& pos, uint16_t propert
     const auto containsInput = [&](PHLWINDOW w, const CBox& box) {
         if (!box.containsPoint(pos))
             return false;
-        if (w->backend().isX11())
-            return true;
+        if (w->backend().isX11()) {
+            const auto& backend = sc<const CX11Backend&>(w->backend());
+            if (backend.isDragIcon())
+                return false;
+            const auto surface = backend.surface();
+            return !backend.traits().overrideRedirect || !surface || surface->m_current.inputIsInfinite || !surface->m_current.input.empty();
+        }
         const auto& id = w->backend().metadata().appID;
         const bool shell = id == "dev.enzui.Desktop" || id == "dev.enzui.Sidebar" ||
             id == "dev.enzui.SidebarBacking" || id == "dev.enzui.ControlCenter" ||

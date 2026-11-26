@@ -37,6 +37,7 @@ class IDataSource {
     virtual void                     error(uint32_t code, const std::string& msg) = 0;
     virtual eDataSourceType          type();
     virtual uint32_t                 actions(); // wl_data_device_manager.dnd_action
+    virtual uint32_t                 preferredDndAction();
     virtual void                     sendDndDropPerformed();
     virtual void                     sendDndAction(wl_data_device_manager_dnd_action a);
 
