@@ -925,6 +925,7 @@ void CWindow::onUpdateMeta(const SBackendMetadata& metadata) {
 
     const auto& NEWCLASS = metadata.appID;
     if (m_metadata->updateAppID(NEWCLASS)) {
+        IPC::Socket2::sock()->postEvent({.event = "windowclass", .data = std::format("{:x}", rc<uintptr_t>(this))});
         Event::bus()->m_events.window.class_.emit(m_self.lock());
 
         if (m_self == Desktop::focusState()->window()) { // if it's the active, let's post an event to update others
