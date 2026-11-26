@@ -120,6 +120,39 @@ TEST_CASE(layoutRefreshDuringMonitorTeardown) {
     EXPECT_CONTAINS(getFromSocket("/monitors all"), TEST_OUTPUT);
 }
 
+TEST_CASE(floatingWindowsSurviveOutputReconnect) {
+    CScopeGuard cleanup = {[] {
+        Tests::killAllWindows();
+        getFromSocket("/output remove HOTPLUG-TEST");
+        getFromSocket("/reload");
+    }};
+
+    OK(getFromSocket("/eval hl.monitor({ output = 'HOTPLUG-TEST', mode = '1920x1080@60', position = '6000x0', scale = 1.5 })"));
+    OK(getFromSocket("/output create headless HOTPLUG-TEST"));
+    ASSERT(waitForMonitor("HOTPLUG-TEST"), true);
+    OK(getFromSocket("/dispatch hl.dsp.focus({ monitor = 'HOTPLUG-TEST' })"));
+    SPAWN_KITTY("hotplug_float");
+    OK(getFromSocket("/dispatch hl.dsp.window.float({ action = 'set', window = 'class:hotplug_float' })"));
+    OK(getFromSocket("/dispatch hl.dsp.window.move({ x = 6300, y = 100, window = 'class:hotplug_float' })"));
+    SPAWN_KITTY("hotplug_pin");
+    OK(getFromSocket("/dispatch hl.dsp.window.float({ action = 'set', window = 'class:hotplug_pin' })"));
+    OK(getFromSocket("/dispatch hl.dsp.window.pin({ action = 'set', window = 'class:hotplug_pin' })"));
+
+    const auto query = [](std::string_view name, std::string_view expression) {
+        return getFromSocket(std::format("/repl for _, w in ipairs(hl.get_windows()) do if w.class == '{}' then return {} end end", name, expression));
+    };
+    ASSERT(query("hotplug_float", "w.monitor and w.monitor.name"), "HOTPLUG-TEST");
+    ASSERT(query("hotplug_pin", "w.monitor and w.monitor.name"), "HOTPLUG-TEST");
+    OK(getFromSocket("/output remove HOTPLUG-TEST"));
+    ASSERT(waitForMonitorRemoved("HOTPLUG-TEST"), true);
+    EXPECT(query("hotplug_pin", "w.pinned and w.monitor and w.monitor.name ~= 'HOTPLUG-TEST'"), "true");
+
+    OK(getFromSocket("/output create headless HOTPLUG-TEST"));
+    ASSERT(waitForMonitor("HOTPLUG-TEST"), true);
+    EXPECT(query("hotplug_float", "w.monitor and w.monitor.name == 'HOTPLUG-TEST' and w.at.x >= w.monitor.x and w.at.x < w.monitor.x + w.monitor.width / w.monitor.scale"), "true");
+    EXPECT(query("hotplug_pin", "w.pinned and w.monitor and w.monitor.name ~= 'HOTPLUG-TEST'"), "true");
+}
+
 // Test if size + pos is preserved after fs cycle
 TEST_CASE(posPreserve) {
     SPAWN_KITTY("kitty");

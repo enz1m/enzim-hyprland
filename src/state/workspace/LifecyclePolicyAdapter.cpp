@@ -53,8 +53,10 @@ class CHyprlandPolicyContext final : public IPolicyContext {
         std::vector<SMonitorSnapshot> snapshots;
         snapshots.reserve(State::monitorState()->monitors().size() + 1);
 
-        for (const auto& monitor : State::monitorState()->monitors())
-            snapshots.emplace_back(monitorSnapshot(monitor));
+        for (const auto& monitor : State::monitorState()->monitors()) {
+            if (monitor->m_enabled && !monitor->isMirror())
+                snapshots.emplace_back(monitorSnapshot(monitor));
+        }
 
         if (m_eventMonitor && std::ranges::none_of(snapshots, [&](const auto& candidate) { return candidate.address == m_eventMonitor->m_name; }))
             snapshots.emplace_back(monitorSnapshot(m_eventMonitor));

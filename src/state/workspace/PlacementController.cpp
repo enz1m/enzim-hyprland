@@ -25,6 +25,7 @@
 #include "../../workspace/RegularWorkspace.hpp"
 #include "../../workspace/query/Query.hpp"
 
+#include <algorithm>
 #include <ranges>
 
 using namespace State::Workspace;
@@ -258,9 +259,10 @@ void CPlacementController::moveWorkspaceToMonitor(PHLWORKSPACE pWorkspace, PHLMO
 
     const bool SWITCHINGISACTIVE = POLDMON ? POLDMON->m_activeWorkspace == pWorkspace : false;
 
-    // fix old mon
+    const bool   DISCONNECTING = POLDMON && !POLDMON->m_enabled;
+
     PHLWORKSPACE nextWorkspaceOnMonitor;
-    if (!SWITCHINGISACTIVE)
+    if (!SWITCHINGISACTIVE || DISCONNECTING)
         nextWorkspaceOnMonitor = pWorkspace;
     else {
         PHLWORKSPACE newWorkspace; // for holding a ref to the new workspace that might be created
@@ -300,33 +302,40 @@ void CPlacementController::moveWorkspaceToMonitor(PHLWORKSPACE pWorkspace, PHLMO
 
     for (auto const& w : Desktop::windowState()->windows()) {
         if (w->m_workspace == pWorkspace) {
-            if (w->m_state & Desktop::View::WINDOW_STATE_PINNED) {
+            const bool PINNED = bool(w->m_state & Desktop::View::WINDOW_STATE_PINNED);
+            if (PINNED && !DISCONNECTING) {
                 w->m_workspace = nextWorkspaceOnMonitor;
                 continue;
             }
 
+            const auto PREVIOUS_BOX = w->layoutTarget()->position();
+            if (PINNED && pMonitor->m_activeWorkspace)
+                w->layoutTarget()->assignToSpace(pMonitor->m_activeWorkspace->space());
+
             w->m_monitor = pMonitor;
 
-            // additionally, move floating and fs windows manually
-            if (w->mapped() && !w->isHidden()) {
-                if (POLDMON) {
-                    if (w->isFloating())
-                        w->layoutTarget()->setPositionGlobal(w->layoutTarget()->position().translate(-POLDMON->m_position + pMonitor->m_position));
+            if (w->mapped() && !w->isHidden() && w->isFloating() && !Fullscreen::controller()->isFullscreen(w)) {
+                auto       box  = PREVIOUS_BOX;
+                const auto AREA = w->m_workspace->space()->workArea(true);
+                if (POLDMON)
+                    box.translate(pMonitor->m_position - POLDMON->m_position);
+                else
+                    box = {AREA.middle() - box.size() / 2.F, box.size()};
 
-                    if (Fullscreen::controller()->isFullscreen(w))
-                        w->setBox({pMonitor->m_position, pMonitor->m_size});
-                } else
-                    w->layoutTarget()->setPositionGlobal(
-                        CBox{Vector2D{
-                                 (pMonitor->m_size.x != 0) ? sc<int>(w->position(Desktop::View::IGeometric::GEOMETRIC_GOAL).x) % sc<int>(pMonitor->m_size.x) : 0,
-                                 (pMonitor->m_size.y != 0) ? sc<int>(w->position(Desktop::View::IGeometric::GEOMETRIC_GOAL).y) % sc<int>(pMonitor->m_size.y) : 0,
-                             },
-                             w->layoutTarget()->position().size()});
+                if (AREA.w > 0 && AREA.h > 0) {
+                    box.w = std::min(box.w, AREA.w);
+                    box.h = std::min(box.h, AREA.h);
+                    box.x = std::clamp(box.x, AREA.x, AREA.x + AREA.w - box.w);
+                    box.y = std::clamp(box.y, AREA.y, AREA.y + AREA.h - box.h);
+                }
+                w->layoutTarget()->setPositionGlobal(box);
             }
 
             w->updateToplevel();
         }
     }
+
+    pWorkspace->space()->recalculate();
 
     if (carryFocus && SWITCHINGISACTIVE && POLDMON == Desktop::focusState()->monitor()) { // if it was active, preserve its' status. If it wasn't, don't.
         LOG(Log::DEBUG, "moveWorkspaceToMonitor: SWITCHINGISACTIVE, active {} -> {}", pMonitor->m_activeWorkspace ? pMonitor->m_activeWorkspace->addressableName() : "none",
@@ -363,7 +372,7 @@ void CPlacementController::moveWorkspaceToMonitor(PHLWORKSPACE pWorkspace, PHLMO
     }
 
     // finalize
-    if (POLDMON) {
+    if (POLDMON && !DISCONNECTING) {
         g_layoutManager->recalculateMonitor(POLDMON);
         if (POLDMON->m_activeWorkspace)
             Animation::Workspace::setFullscreenFadeAnimation(POLDMON->m_activeWorkspace,
