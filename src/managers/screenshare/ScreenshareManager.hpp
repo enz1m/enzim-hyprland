@@ -6,6 +6,7 @@
 #include "../../render/Framebuffer.hpp"
 #include "../eventLoop/EventLoopTimer.hpp"
 #include "../../render/Renderer.hpp"
+#include "UndeliveredDamage.hpp"
 
 // TODO: do screenshare damage
 
@@ -80,6 +81,7 @@ namespace Screenshare {
 
         SP<CEventLoopTimer>      m_shareStopTimer;
         bool                     m_sharing = false;
+        CUndeliveredDamage       m_undeliveredDamage;
 
         struct {
             CHyprSignalListener monitorDestroyed;
@@ -223,7 +225,7 @@ namespace Screenshare {
 
         UP<CCursorshareSession> newCursorSession(wl_client* client, WP<CWLPointerResource> pointer);
 
-        void                    onOutputCommit(PHLMONITOR monitor);
+        void                    onOutputCommit(PHLMONITOR monitor, const CRegion& damage);
         bool                    isOutputBeingSSd(PHLMONITOR monitor);
         bool                    outputNeedsCopyFB(PHLMONITOR monitor);
         SOutputCopyFBState      outputCopyFBState(PHLMONITOR monitor);

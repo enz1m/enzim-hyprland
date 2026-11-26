@@ -119,10 +119,12 @@ eScreenshareError CScreenshareFrame::share(SP<IHLBuffer> buffer, const CRegion& 
     m_callback = callback;
     m_shared   = true;
 
-    if (m_session->m_type == SHARE_MONITOR || m_session->m_type == SHARE_REGION) {
-        const auto PMONITOR = m_session->monitor();
-        if (PMONITOR)
+    if (const auto PMONITOR = m_session->monitor()) {
+        if (m_session->m_type == SHARE_MONITOR || m_session->m_type == SHARE_REGION)
             PMONITOR->addDamage(PMONITOR->resources()->pendingMirrorFBDamage());
+
+        if (const auto UNDELIVERED = m_session->m_undeliveredDamage.takeForNextFrame(); !UNDELIVERED.empty())
+            PMONITOR->addDamage(UNDELIVERED);
     }
 
     // schedule a frame so that when a screenshare starts it isn't black until the output is updated

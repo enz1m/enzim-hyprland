@@ -11,8 +11,17 @@ CScreenshareManager::CScreenshareManager() {
     ;
 }
 
-void CScreenshareManager::onOutputCommit(PHLMONITOR monitor) {
+void CScreenshareManager::onOutputCommit(PHLMONITOR monitor, const CRegion& damage) {
     std::erase_if(m_sessions, [&](const WP<CScreenshareSession>& session) { return session.expired(); });
+
+    for (const auto& session : m_sessions) {
+        if (session->m_stopped || session->monitor() != monitor)
+            continue;
+
+        const bool frameWaiting = std::ranges::any_of(
+            m_pendingFrames, [&](const WP<CScreenshareFrame>& frame) { return !frame.expired() && frame->m_shared && !frame->done() && frame->m_session == session; });
+        session->m_undeliveredDamage.onOutputCommit(damage, frameWaiting);
+    }
 
     // if no pending frames, and no sessions are sharing, then unblock ds
     if (m_pendingFrames.empty()) {
