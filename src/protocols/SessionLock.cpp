@@ -22,6 +22,9 @@ CSessionLockSurface::CSessionLockSurface(SP<CExtSessionLockSurfaceV1> resource_,
         PROTO::sessionLock->destroyResource(this);
     });
 
+    if (!m_monitor)
+        return;
+
     m_resource->setAckConfigure([this](CExtSessionLockSurfaceV1* r, uint32_t serial) { m_ackdConfigure = true; });
 
     m_listeners.surfaceCommit = m_surface->m_events.commit.listen([this] {
@@ -203,17 +206,11 @@ void CSessionLockProtocol::onLock(CExtSessionLockManagerV1* pMgr, uint32_t id) {
 void CSessionLockProtocol::onGetLockSurface(CExtSessionLockV1* lock, uint32_t id, wl_resource* surface, wl_resource* output) {
     LOG(Log::DEBUG, "New sessionLockSurface with id {}", id);
 
-    auto PSURFACE  = CWLSurfaceResource::fromResource(surface);
-    auto OUTPUTRES = CWLOutputResource::fromResource(output);
-    if (!OUTPUTRES) {
-        LOG(Log::ERR, "onGetLockSurface: invalid output resource");
-        return;
-    }
-    auto PMONITOR = OUTPUTRES->m_monitor.lock();
-    if (!PMONITOR) {
-        LOG(Log::ERR, "onGetLockSurface: monitor is gone for output resource");
-        return;
-    }
+    const auto PSURFACE  = CWLSurfaceResource::fromResource(surface);
+    const auto OUTPUTRES = CWLOutputResource::fromResource(output);
+    auto       monitor   = OUTPUTRES ? OUTPUTRES->m_monitor.lock() : nullptr;
+    if (monitor && !monitor->m_enabled)
+        monitor.reset();
 
     SP<CSessionLock> sessionLock;
     for (auto const& l : m_locks) {
@@ -224,7 +221,7 @@ void CSessionLockProtocol::onGetLockSurface(CExtSessionLockV1* lock, uint32_t id
     }
 
     const auto RESOURCE =
-        m_lockSurfaces.emplace_back(makeShared<CSessionLockSurface>(makeShared<CExtSessionLockSurfaceV1>(lock->client(), lock->version(), id), PSURFACE, PMONITOR, sessionLock));
+        m_lockSurfaces.emplace_back(makeShared<CSessionLockSurface>(makeShared<CExtSessionLockSurfaceV1>(lock->client(), lock->version(), id), PSURFACE, monitor, sessionLock));
 
     if UNLIKELY (!RESOURCE->good()) {
         lock->noMemory();
@@ -232,7 +229,9 @@ void CSessionLockProtocol::onGetLockSurface(CExtSessionLockV1* lock, uint32_t id
         return;
     }
 
-    sessionLock->m_events.newLockSurface.emit(RESOURCE);
+    // The client must be able to destroy the new object if the output vanished in flight.
+    if (monitor)
+        sessionLock->m_events.newLockSurface.emit(RESOURCE);
 }
 
 bool CSessionLockProtocol::isLocked() {
