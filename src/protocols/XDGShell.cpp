@@ -101,6 +101,23 @@ CXDGPopupResource::~CXDGPopupResource() {
     m_events.destroy.emit();
 }
 
+Vector2D CXDGPopupResource::positionerAnchor(const Vector2D& t1coord) const {
+    const auto PARENT = m_parent.lock();
+    if (!PARENT)
+        return t1coord;
+
+    const auto ANCHOR = m_positionerRules.anchorPoint();
+    auto       size   = PARENT->m_current.geometry.size();
+    if ((size.x <= 0 || size.y <= 0) && PARENT->m_surface)
+        size = PARENT->m_surface->m_current.size;
+
+    const auto PARENT_POS = t1coord + accumulateParentOffset();
+    if (ANCHOR.x < 0 || ANCHOR.y < 0 || ANCHOR.x > size.x || ANCHOR.y > size.y)
+        return PARENT_POS;
+
+    return PARENT_POS + ANCHOR;
+}
+
 void CXDGPopupResource::applyPositioning(const CBox& box, const Vector2D& t1coord) {
     CBox constraint = box.copy().translate(m_surface->m_pending.geometry.pos());
 
@@ -114,7 +131,7 @@ void CXDGPopupResource::applyPositioning(const CBox& box, const Vector2D& t1coor
         repositioned();
 }
 
-Vector2D CXDGPopupResource::accumulateParentOffset() {
+Vector2D CXDGPopupResource::accumulateParentOffset() const {
     SP<CXDGSurfaceResource> current = m_parent.lock();
     Vector2D                off;
     while (current) {
@@ -788,6 +805,19 @@ CXDGPositionerRules::CXDGPositionerRules(SP<CXDGPositionerResource> positioner) 
     ;
 }
 
+Vector2D CXDGPositionerRules::anchorPoint() const {
+    const auto& rect   = m_state.anchorRect;
+    auto        anchor = m_state.anchor;
+    return {
+        anchor.left()      ? rect.x :
+            anchor.right() ? rect.extent().x :
+                             rect.middle().x,
+        anchor.top()        ? rect.y :
+            anchor.bottom() ? rect.extent().y :
+                              rect.middle().y,
+    };
+}
+
 CBox CXDGPositionerRules::getPosition(CBox constraint, const Vector2D& parentCoord) {
     LOG(Log::DEBUG, "GetPosition with constraint {} {} and parent {}", constraint.pos(), constraint.size(), parentCoord);
 
@@ -800,8 +830,7 @@ CBox CXDGPositionerRules::getPosition(CBox constraint, const Vector2D& parentCoo
     auto height  = m_state.requestedSize.y;
     auto gravity = m_state.gravity;
 
-    auto anchorX = m_state.anchor.left() ? anchorRect.x : m_state.anchor.right() ? anchorRect.extent().x : anchorRect.middle().x;
-    auto anchorY = m_state.anchor.top() ? anchorRect.y : m_state.anchor.bottom() ? anchorRect.extent().y : anchorRect.middle().y;
+    auto [anchorX, anchorY] = anchorPoint() + parentCoord;
 
     auto calcEffectiveX = [&](CEdges anchorGravity, double anchorX) { return anchorGravity.left() ? anchorX - width : anchorGravity.right() ? anchorX : anchorX - width / 2; };
     auto calcEffectiveY = [&](CEdges anchorGravity, double anchorY) { return anchorGravity.top() ? anchorY - height : anchorGravity.bottom() ? anchorY : anchorY - height / 2; };

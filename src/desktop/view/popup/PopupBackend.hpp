@@ -19,6 +19,7 @@ namespace Desktop::View {
         virtual CBox                   surfaceGeometry() const = 0;
         virtual Vector2D               surfaceSize() const     = 0;
 
+        virtual Vector2D               positionerAnchor(const Vector2D& t1Coord) const                     = 0;
         virtual void                   applyPositioning(const CBox& availableBox, const Vector2D& t1Coord) = 0;
         virtual void                   scheduleConfigure()                                                 = 0;
 

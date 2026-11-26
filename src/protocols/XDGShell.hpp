@@ -40,7 +40,8 @@ class CXDGPositionerRules {
   public:
     CXDGPositionerRules(SP<CXDGPositionerResource> positioner);
 
-    CBox getPosition(CBox constraint, const Vector2D& parentPos);
+    Vector2D anchorPoint() const;
+    CBox     getPosition(CBox constraint, const Vector2D& parentPos);
 
   private:
     SXDGPositionerState m_state;
@@ -66,7 +67,8 @@ class CXDGPopupResource {
 
     bool                         good();
 
-    void                         applyPositioning(const CBox& availableBox, const Vector2D& t1coord /* relative to box */);
+    Vector2D                     positionerAnchor(const Vector2D& t1coord) const;
+    void                         applyPositioning(const CBox& availableBox, const Vector2D& t1coord);
 
     WP<CXDGSurfaceResource>      m_surface;
     WP<CXDGSurfaceResource>      m_parent;
@@ -93,7 +95,7 @@ class CXDGPopupResource {
 
     uint32_t            m_lastRepositionToken = 0;
 
-    Vector2D            accumulateParentOffset();
+    Vector2D            accumulateParentOffset() const;
 
     CXDGPositionerRules m_positionerRules;
 };

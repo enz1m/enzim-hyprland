@@ -17,6 +17,7 @@ namespace Desktop::View {
         CBox                   surfaceGeometry() const override;
         Vector2D               surfaceSize() const override;
 
+        Vector2D               positionerAnchor(const Vector2D& t1Coord) const override;
         void                   applyPositioning(const CBox& availableBox, const Vector2D& t1Coord) override;
         void                   scheduleConfigure() override;
 

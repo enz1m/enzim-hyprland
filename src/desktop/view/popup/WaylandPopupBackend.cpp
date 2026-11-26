@@ -63,6 +63,11 @@ Vector2D CWaylandPopupBackend::surfaceSize() const {
     return SURFACE ? SURFACE->m_current.size : Vector2D{};
 }
 
+Vector2D CWaylandPopupBackend::positionerAnchor(const Vector2D& t1Coord) const {
+    const auto RESOURCE = m_resource.lock();
+    return RESOURCE ? RESOURCE->positionerAnchor(t1Coord) : t1Coord;
+}
+
 void CWaylandPopupBackend::applyPositioning(const CBox& availableBox, const Vector2D& t1Coord) {
     const auto RESOURCE = m_resource.lock();
     if (RESOURCE)

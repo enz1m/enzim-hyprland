@@ -371,7 +371,8 @@ void CPopup::onReposition() {
 
 void CPopup::reposition() {
     const auto COORDS   = t1ParentCoords();
-    const auto PMONITOR = State::monitorState()->query().vec(COORDS).run();
+    const auto ANCHOR   = m_windowOwner ? m_backend->positionerAnchor(COORDS) : COORDS;
+    const auto PMONITOR = State::monitorState()->query().vec(ANCHOR).run();
 
     if (!PMONITOR)
         return;
