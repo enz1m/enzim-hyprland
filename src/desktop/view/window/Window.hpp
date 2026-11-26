@@ -38,6 +38,8 @@ namespace Desktop {
     enum eFocusReason : uint32_t;
 }
 
+class CEventLoopTimer;
+
 namespace Desktop::View {
 
     class CGroup;
@@ -267,6 +269,8 @@ namespace Desktop::View {
         void         attachBackendListeners();
         void         mapWindow();
         void         updateBorderlessFullscreen();
+        void         scheduleFullscreenFocus();
+        void         showDeferredFullscreenDialog();
         void         unmapWindow();
         void         commitWindow(bool initialCommit);
         void         destroyWindow();
@@ -281,12 +285,16 @@ namespace Desktop::View {
         void         unmanagedSetGeometry(const CBox& box);
         virtual void onInputBlockStateUpdated(bool blocked) override;
         // For hidden windows and stuff
-        bool        m_hidden               = false;
-        bool        m_borderlessFullscreen = false;
-        bool        m_suspended            = false;
-        bool        m_isMapped             = false;
-        std::string m_lastWorkspaceAddress;
-        bool        m_lastWorkspaceSpecial = false;
+        bool                m_hidden                   = false;
+        bool                m_borderlessFullscreen     = false;
+        bool                m_suspended                = false;
+        bool                m_isMapped                 = false;
+        bool                m_fullscreenDialogDeferred = false;
+        SP<CEventLoopTimer> m_fullscreenFocusTimer;
+        PHLWINDOWREF        m_pendingUserActivationSource;
+        Time::steady_tp     m_pendingUserActivationUntil;
+        std::string         m_lastWorkspaceAddress;
+        bool                m_lastWorkspaceSpecial = false;
 
         struct {
             bool activate            = false;

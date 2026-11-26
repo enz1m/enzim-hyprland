@@ -204,6 +204,16 @@ int main(int argc, char** argv) try {
     target.redeem(source.mint(source.m_seat, source.m_press));
     require(focused("activation-source"), "expired input authorized activation");
 
+    require(getFromSocket("/eval hl.config({misc = {protect_fullscreen_focus = true, focus_on_activate = true}})") == "ok", "could not enable fullscreen focus protection");
+    require(getFromSocket("/dispatch hl.dsp.window.fullscreen({mode = 'fullscreen', action = 'set'})") == "ok", "could not make source fullscreen");
+    target.redeem(target.mint(nullptr, 0));
+    require(focused("activation-source"), "background activation moved focus over fullscreen");
+    require(getFromSocket("/dispatch hl.dsp.window.fullscreen({mode = 'fullscreen', action = 'unset'})") == "ok", "could not leave fullscreen");
+    for (int attempt = 0; attempt < 50 && !focused("activation-target"); ++attempt)
+        std::this_thread::sleep_for(20ms);
+    require(focused("activation-target"), "fullscreen exit lost deferred activation");
+
+    require(getFromSocket("/dispatch hl.dsp.focus({window = 'class:activation-source'})") == "ok", "could not refocus source");
     require(getFromSocket("/eval hl.window_rule({match = {class = 'activation-target'}, focus_on_activate = false})") == "ok", "could not set target rule");
     source.press();
     target.redeem(source.mint(source.m_seat, source.m_press));

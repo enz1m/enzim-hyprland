@@ -4,6 +4,7 @@
 #include "../../../animation/AnimationManager.hpp"
 #include "../../../config/ConfigValue.hpp"
 #include "../../../config/shared/animation/AnimationTree.hpp"
+#include "../../../event/EventBus.hpp"
 #include "../../../layout/target/Target.hpp"
 #include "../../../managers/fullscreen/FullscreenController.hpp"
 #include "../../../output/Monitor.hpp"
@@ -188,8 +189,13 @@ SP<CHyprTitleBarDecoration> CWindowPresentation::titleBarAt(const Vector2D& pos)
 }
 
 void CWindowPresentation::onDecorationModeChanged() {
-    if (m_titleBarDecoration)
-        m_titleBarDecoration->refresh();
+    if (!m_titleBarDecoration)
+        return;
+
+    const bool WAS_SHOWN = m_titleBarDecoration->shown();
+    m_titleBarDecoration->refresh();
+    if (WAS_SHOWN != m_titleBarDecoration->shown())
+        Event::bus()->m_events.window.borderlessFullscreen.emit(m_window.m_self.lock());
 }
 
 Types::CMultiAVarContainer<float, uint8_t>& CWindowPresentation::alpha() {

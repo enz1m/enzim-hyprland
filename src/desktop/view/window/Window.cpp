@@ -389,7 +389,7 @@ void CWindow::updateToplevel() {
 }
 
 void CWindow::updateSurfaceScaleTransformDetails(bool force) {
-    if (!m_isMapped || m_hidden)
+    if (!m_isMapped || isHidden())
         return;
 
     const auto PLASTMONITOR = State::monitorState()->query().id(m_lastSurfaceMonitorID).run();
@@ -639,7 +639,7 @@ void CWindow::setHidden(bool hidden) {
 }
 
 bool CWindow::isHidden() const {
-    return m_hidden;
+    return m_hidden || m_fullscreenDialogDeferred;
 }
 
 bool CWindow::shouldBlur() const {
@@ -827,17 +827,89 @@ std::unordered_map<std::string, std::string> CWindow::getEnv() {
     return results;
 }
 
+static PHLWINDOW fullscreenFocusOwner() {
+    static auto PPROTECT = CConfigValue<Config::INTEGER>("misc:protect_fullscreen_focus");
+    if (!*PPROTECT)
+        return nullptr;
+
+    const auto WINDOW = Desktop::focusState()->window();
+    if (!WINDOW || !WINDOW->mapped() || WINDOW->isHidden() || !WINDOW->m_workspace || !WINDOW->m_workspace->visible())
+        return nullptr;
+
+    const auto MONITOR = WINDOW->m_monitor.lock();
+    if (!MONITOR || MONITOR->m_name.starts_with("ENZREMOTE-"))
+        return nullptr;
+
+    for (const auto& tag : WINDOW->m_ruleApplicator->m_tagKeeper.getTags()) {
+        if (tag == "enzui-sidebar-app" || tag.starts_with("enzremote-"))
+            return nullptr;
+    }
+
+    return Fullscreen::controller()->isFullscreen(WINDOW, Fullscreen::FSMODE_FULLSCREEN) || WINDOW->borderlessFullscreen() ? WINDOW : nullptr;
+}
+
+void CWindow::showDeferredFullscreenDialog() {
+    m_fullscreenDialogDeferred = false;
+    if (!isHidden()) {
+        updateSurfaceScaleTransformDetails(true);
+        g_pHyprRenderer->damageWindow(m_self.lock());
+    }
+}
+
+void CWindow::scheduleFullscreenFocus() {
+    using namespace std::chrono_literals;
+    if (m_fullscreenFocusTimer)
+        return;
+
+    // Brokered prompts can outlive a workspace switch, game exit, or session lock.
+    m_fullscreenFocusTimer = makeShared<CEventLoopTimer>(
+        150ms,
+        [self = m_self](const auto& timer, void*) {
+            const auto window = self.lock();
+            if (!window || !window->mapped())
+                return;
+
+            const auto active = Desktop::focusState()->window();
+            if (fullscreenFocusOwner() || g_pSessionLockManager->isSessionLocked() || !g_pInputManager->m_exclusiveKeyboardLSes.empty() ||
+                (active && active != window && active->m_ruleApplicator->stayFocused().valueOrDefault())) {
+                timer->updateTimeout(150ms);
+                return;
+            }
+
+            window->m_fullscreenFocusTimer.reset();
+            if (window->m_fullscreenDialogDeferred) {
+                window->showDeferredFullscreenDialog();
+                if (window->m_workspace && window->m_workspace->visible() && !window->isHidden() && !(window->m_state & WINDOW_STATE_NO_INITIAL_FOCUS))
+                    Desktop::focusState()->fullWindowFocus(window, FOCUS_REASON_NEW_WINDOW);
+            } else
+                window->activate();
+        },
+        nullptr);
+    g_pEventLoopManager->addTimer(m_fullscreenFocusTimer);
+}
+
 void CWindow::activate(bool force) {
     activateWithPolicy(force, false);
 }
 
 void CWindow::activateFromUserInput() {
+    if (!mapped() && fullscreenFocusOwner()) {
+        m_pendingUserActivationSource = Desktop::focusState()->window();
+        m_pendingUserActivationUntil  = Time::steadyNow() + std::chrono::seconds{1};
+        return;
+    }
+
     activateWithPolicy(false, true);
 }
 
 void CWindow::activateWithPolicy(bool force, bool userInput) {
     if (Desktop::focusState()->window() == m_self)
         return;
+
+    if (!force && !userInput && mapped() && fullscreenFocusOwner()) {
+        scheduleFullscreenFocus();
+        return;
+    }
 
     static auto PFOCUSONACTIVATE = CConfigValue<Config::INTEGER>("misc:focus_on_activate");
 
@@ -857,6 +929,14 @@ void CWindow::activateWithPolicy(bool force, bool userInput) {
     if (userInput &&
         (g_pSessionLockManager->isSessionLocked() || !g_pInputManager->m_exclusiveKeyboardLSes.empty() || m_ruleApplicator->noFocus().valueOrDefault() ||
          (g_pSeatManager->m_seatGrab && !g_pSeatManager->m_seatGrab->accepts(wlSurface()->resource()))))
+        return;
+
+    if (userInput) {
+        m_fullscreenFocusTimer.reset();
+        if (m_fullscreenDialogDeferred)
+            showDeferredFullscreenDialog();
+    }
+    if (isHidden())
         return;
 
     if (m_target->floating())
@@ -1516,6 +1596,16 @@ void CWindow::mapWindow() {
         m_state &= ~WINDOW_STATE_NO_INITIAL_FOCUS;
     }
 
+    const auto ACTIVATION_SOURCE = std::exchange(m_pendingUserActivationSource, {}).lock();
+    const bool TRUSTED_OPEN =
+        ACTIVATION_SOURCE && ACTIVATION_SOURCE == PFOCUSEDWINDOWPREV && Time::steadyNow() <= m_pendingUserActivationUntil && !g_pSessionLockManager->isSessionLocked();
+    const bool BROKER_DIALOG     = (m_state & WINDOW_STATE_PINNED) && m_ruleApplicator->stayFocused().valueOrDefault();
+    const bool BACKGROUND_DIALOG = (TRAITS.modal || TRAITS.transient) && m_backend->parent() != PFOCUSEDWINDOWPREV;
+    if (m_target->floating() && (BROKER_DIALOG || BACKGROUND_DIALOG) && !TRUSTED_OPEN && fullscreenFocusOwner()) {
+        m_fullscreenDialogDeferred = true;
+        scheduleFullscreenFocus();
+    }
+
     // check LS focus grab
     const auto PFORCEFOCUS  = Desktop::viewState()->query().forceFocus().runWindow();
     const auto PLSFROMFOCUS = Desktop::viewState()->query().type(VIEW_TYPE_LAYER_SURFACE).surface(Desktop::focusState()->surface()).runLayer();
@@ -1535,8 +1625,9 @@ void CWindow::mapWindow() {
             Fullscreen::controller()->setFullscreenMode(Fullscreen::controller()->getFullscreenWindow(m_workspace), Fullscreen::FSMODE_NONE, std::nullopt);
     }
 
-    if (!m_ruleApplicator->noFocus().valueOrDefault() && !(m_state & WINDOW_STATE_NO_INITIAL_FOCUS) && (!TRAITS.overrideRedirect || TRAITS.wantsFocus) && !workspaceSilent &&
-        !monitorSilent && (!PFORCEFOCUS || PFORCEFOCUS == m_self.lock()) && !g_pInputManager->isConstrained()) {
+    if (!m_fullscreenDialogDeferred && !m_ruleApplicator->noFocus().valueOrDefault() && !(m_state & WINDOW_STATE_NO_INITIAL_FOCUS) &&
+        (!TRAITS.overrideRedirect || TRAITS.wantsFocus) && !workspaceSilent && !monitorSilent && (!PFORCEFOCUS || PFORCEFOCUS == m_self.lock()) &&
+        !g_pInputManager->isConstrained()) {
 
         // don't steal pointer focus with X11 when buttons are held (e.g., during drags)
         // if the incoming window is an OR
@@ -1555,7 +1646,8 @@ void CWindow::mapWindow() {
     if (requestedClientFSMode == Fullscreen::FSMODE_MAXIMIZED && m_fullscreenPolicy->requestSuppression().maximize)
         requestedClientFSMode.reset();
 
-    if (!(m_state & WINDOW_STATE_NO_INITIAL_FOCUS) && (requestedInternalFSMode.has_value() || requestedClientFSMode.has_value() || requestedFSState.has_value())) {
+    if (!m_fullscreenDialogDeferred && !(m_state & WINDOW_STATE_NO_INITIAL_FOCUS) &&
+        (requestedInternalFSMode.has_value() || requestedClientFSMode.has_value() || requestedFSState.has_value())) {
         // fix fullscreen on requested (basically do a switcheroo)
         std::optional<bool> wasFullscreenLayoutHandled = std::nullopt;
         if (Fullscreen::controller()->hasFullscreen(m_workspace)) {
@@ -1646,6 +1738,7 @@ void CWindow::unmapWindow() {
     m_events.unmap.emit();
     IPC::Socket2::sock()->postEvent({"closewindow", std::format("{:x}", m_self.lock())});
     Event::bus()->m_events.window.close.emit(m_self.lock());
+    m_fullscreenFocusTimer.reset();
 
     if (m_target->floating() && !m_backend->isX11() && m_ruleApplicator->persistentSize().valueOrDefault()) {
         LOG(Log::DEBUG, "storing floating size {}x{} for window {}::{} on close", m_realSize->value().x, m_realSize->value().y, m_metadata->appID(), m_metadata->title());
@@ -1663,11 +1756,12 @@ void CWindow::unmapWindow() {
     }
 
     // Allow the renderer to catch the last frame.
-    const auto SNAPSHOT =
-        g_pHyprRenderer->shouldRenderWindow(m_self.lock()) && !m_ruleApplicator->noAnim().valueOrDefault() ? g_pHyprRenderer->makeSnapshotFB(m_self.lock()) : nullptr;
+    const auto SNAPSHOT = !m_fullscreenDialogDeferred && g_pHyprRenderer->shouldRenderWindow(m_self.lock()) && !m_ruleApplicator->noAnim().valueOrDefault() ?
+        g_pHyprRenderer->makeSnapshotFB(m_self.lock()) :
+        nullptr;
 
-    bool      wasLastWindow = WAS_FOCUSED;
-    PHLWINDOW nextInGroup   = RESTORED_SWALLOW_WINDOW ? RESTORED_SWALLOW_WINDOW : [this] -> PHLWINDOW {
+    bool       wasLastWindow = WAS_FOCUSED;
+    PHLWINDOW  nextInGroup   = RESTORED_SWALLOW_WINDOW ? RESTORED_SWALLOW_WINDOW : [this] -> PHLWINDOW {
         if (!m_grouping->group())
             return nullptr;
 
@@ -1704,7 +1798,8 @@ void CWindow::unmapWindow() {
     g_pHyprRenderer->damageWindow(m_self.lock());
 
     // do this after onWindowRemoved because otherwise it'll think the window is invalid
-    m_isMapped = false;
+    m_isMapped                 = false;
+    m_fullscreenDialogDeferred = false;
 
     // refocus on a new window if needed
     if (wasLastWindow) {
