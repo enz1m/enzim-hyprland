@@ -41,6 +41,33 @@ CWLDataOfferResource::CWLDataOfferResource(SP<CWlDataOffer> resource_, SP<IDataS
         m_accepted = mime;
     });
 
+    m_resource->setSetActions([this, previous = std::optional<wl_data_device_manager_dnd_action>{}](CWlDataOffer* r, uint32_t actions, uint32_t preferred) mutable {
+        constexpr uint32_t COPY = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+        constexpr uint32_t MOVE = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+        constexpr uint32_t ASK  = WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK;
+        if (actions & ~(COPY | MOVE | ASK)) {
+            r->error(WL_DATA_OFFER_ERROR_INVALID_ACTION_MASK, "Invalid destination drag actions");
+            return;
+        }
+        if (preferred && ((preferred & (preferred - 1)) || !(preferred & actions))) {
+            r->error(WL_DATA_OFFER_ERROR_INVALID_ACTION, "Invalid preferred destination drag action");
+            return;
+        }
+
+        const auto source = m_source.lock();
+        if (!source || !source->hasDnd() || m_dead)
+            return;
+
+        const auto allowed  = source->actions() & actions & (COPY | MOVE);
+        const auto selected = sc<wl_data_device_manager_dnd_action>((preferred & allowed) ? preferred : (allowed & COPY) ? COPY : (allowed & MOVE));
+        if (previous == selected)
+            return;
+
+        previous = selected;
+        r->sendAction(selected);
+        source->sendDndAction(selected);
+    });
+
     m_resource->setReceive([this](CWlDataOffer* r, const char* mime, int fd) {
         CFileDescriptor sendFd{fd};
         if (!m_source) {
