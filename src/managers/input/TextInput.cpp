@@ -50,33 +50,26 @@ void CTextInput::destroy() {
 void CTextInput::onEnabled(SP<CWLSurfaceResource> surfV1) {
     LOG(Log::DEBUG, "TI ENABLE");
 
-    if (g_pInputManager->m_relay.m_inputMethod.expired()) {
-        // LOG(Log::WARN,  "Enabling TextInput on no IME!");
-        return;
-    }
+    m_committedText = false;
+    m_hasPreedit    = false;
 
-    // v1 only, map surface to PTI
     if (!isV3()) {
-        if (Desktop::focusState()->surface() != surfV1 || !m_v1Input->m_active)
+        if (g_pInputManager->m_relay.m_inputMethod.expired() || Desktop::focusState()->surface() != surfV1 || !m_v1Input->m_active)
             return;
 
         enter(surfV1);
     }
 
-    g_pInputManager->m_relay.activateIME(this);
+    if (focusedSurface() && focusedSurface() == Desktop::focusState()->surface())
+        g_pInputManager->m_relay.activateIME(this);
 }
 
 void CTextInput::onDisabled() {
-    if (g_pInputManager->m_relay.m_inputMethod.expired()) {
-        //  LOG(Log::WARN,  "Disabling TextInput on no IME!");
-        return;
-    }
+    m_committedText = false;
+    m_hasPreedit    = false;
 
     if (!isV3())
         leave();
-
-    m_listeners.surfaceUnmap.reset();
-    m_listeners.surfaceDestroy.reset();
 
     if (!focusedSurface())
         return;
@@ -89,6 +82,9 @@ void CTextInput::onDisabled() {
 }
 
 void CTextInput::onReset() {
+    m_committedText = false;
+    m_hasPreedit    = false;
+
     if (g_pInputManager->m_relay.m_inputMethod.expired())
         return;
 
@@ -123,8 +119,11 @@ void CTextInput::setFocusedSurface(SP<CWLSurfaceResource> pSurface) {
 
     m_focusedSurface = pSurface;
 
-    if (!pSurface)
+    if (!pSurface) {
+        m_listeners.surfaceUnmap.reset();
+        m_listeners.surfaceDestroy.reset();
         return;
+    }
 
     // Kept after the surface leaves, so the deactivation that follows an unlock is still private.
     m_lockSurface = g_pSessionLockManager && g_pSessionLockManager->isSurfaceSessionLock(pSurface);
@@ -213,6 +212,9 @@ void CTextInput::leave() {
         m_enterLocks = 0;
     }
 
+    m_committedText = false;
+    m_hasPreedit    = false;
+
     if (isV3())
         m_v3Input->leave(focusedSurface());
     else
@@ -267,6 +269,7 @@ void CTextInput::updateIMEState(SP<CInputMethodV2> ime) {
     if (isV3()) {
         const auto INPUT = m_v3Input.lock();
 
+        m_hasPreedit = ime->m_current.preeditString.committed && !ime->m_current.preeditString.string.empty();
         if (ime->m_current.preeditString.committed)
             INPUT->preeditString(ime->m_current.preeditString.string, ime->m_current.preeditString.begin, ime->m_current.preeditString.end);
 
@@ -300,6 +303,46 @@ void CTextInput::updateIMEState(SP<CInputMethodV2> ime) {
             if (ime->m_current.preeditString.committed)
                 INPUT->commitString(m_v1Input->m_serial, ime->m_current.preeditString.string.c_str());
         }
+    }
+}
+
+static bool followsWord(std::string_view before) {
+    if (before.empty())
+        return false;
+
+    if (std::string_view{" \t\n\r\v\f([{\"'"}.contains(before.back()))
+        return false;
+
+    static constexpr std::string_view SEPARATORS[] = {
+        "«",      "¿",      "¡",      "\u0085", "\u00a0", "\u1680", "\u2000", "\u2001", "\u2002", "\u2003", "\u2004",
+        "\u2005", "\u2006", "\u2007", "\u2008", "\u2009", "\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000",
+    };
+    return std::ranges::none_of(SEPARATORS, [before](auto separator) { return before.ends_with(separator); });
+}
+
+bool CTextInput::commitText(std::string_view text, bool spaceBefore) {
+    if (m_hasPreedit)
+        return false;
+
+    const auto  INPUT       = m_v3Input.lock();
+    const auto& SURROUNDING = INPUT->m_current.surrounding;
+    const auto  CURSOR      = std::min(SURROUNDING.cursor, SURROUNDING.anchor);
+    const bool  SPACE       = spaceBefore && (SURROUNDING.updated ? followsWord(std::string_view{SURROUNDING.text}.substr(0, CURSOR)) : m_committedText);
+
+    INPUT->commitString(SPACE ? std::string{" "} + std::string{text} : std::string{text});
+    INPUT->sendDone();
+    m_committedText = true;
+    return true;
+}
+
+void CTextInput::clearPreedit() {
+    if (!m_hasPreedit)
+        return;
+
+    m_hasPreedit = false;
+    if (auto input = m_v3Input.lock()) {
+        input->preeditString("", 0, 0);
+        input->sendDone();
     }
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string_view>
 #include "../../helpers/math/Math.hpp"
 #include "../../helpers/signal/Signal.hpp"
 #include "../../helpers/memory/Memory.hpp"
@@ -23,6 +24,8 @@ class CTextInput {
     wl_client*             client();
     void                   commitStateToIME(SP<CInputMethodV2> ime);
     void                   updateIMEState(SP<CInputMethodV2> ime);
+    bool                   commitText(std::string_view text, bool spaceBefore);
+    void                   clearPreedit();
 
     void                   onEnabled(SP<CWLSurfaceResource> surfV1 = nullptr);
     void                   onDisabled();
@@ -43,8 +46,10 @@ class CTextInput {
     void                   destroy();
 
     WP<CWLSurfaceResource> m_focusedSurface;
-    int                    m_enterLocks  = 0;
-    bool                   m_lockSurface = false;
+    int                    m_enterLocks    = 0;
+    bool                   m_lockSurface   = false;
+    bool                   m_hasPreedit    = false;
+    bool                   m_committedText = false;
     WP<CTextInputV3>       m_v3Input;
     WP<CTextInputV1>       m_v1Input;
 

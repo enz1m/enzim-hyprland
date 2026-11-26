@@ -32,6 +32,7 @@ class CInputMethodRelay {
     void               onKeyboardFocus(SP<CWLSurfaceResource>);
 
     CTextInput*        getFocusedTextInput();
+    bool               commitText(std::string_view text, bool spaceBefore);
 
     void               removePopup(CInputPopup*);
 

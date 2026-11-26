@@ -8,6 +8,8 @@
 #include "../helpers/MiscFunctions.hpp"
 using namespace Hyprutils::OS;
 
+bool               enzuiAllowsVirtualKeyboardEvents(const wl_client* client);
+
 static std::string virtualKeyboardNameForWlClient(wl_client* client) {
     std::string name = "hl-virtual-keyboard";
 
@@ -39,6 +41,9 @@ CVirtualKeyboardV1Resource::CVirtualKeyboardV1Resource(SP<CZwpVirtualKeyboardV1>
     m_resource->setOnDestroy([this](CZwpVirtualKeyboardV1* r) { destroy(); });
 
     m_resource->setKey([this](CZwpVirtualKeyboardV1* r, uint32_t timeMs, uint32_t key, uint32_t state) {
+        if (!enzuiAllowsVirtualKeyboardEvents(r->client()))
+            return;
+
         if UNLIKELY (!m_hasKeymap) {
             r->error(ZWP_VIRTUAL_KEYBOARD_V1_ERROR_NO_KEYMAP, "Key event received before a keymap was set");
             return;
@@ -58,6 +63,9 @@ CVirtualKeyboardV1Resource::CVirtualKeyboardV1Resource(SP<CZwpVirtualKeyboardV1>
     });
 
     m_resource->setModifiers([this](CZwpVirtualKeyboardV1* r, uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group) {
+        if (!enzuiAllowsVirtualKeyboardEvents(r->client()))
+            return;
+
         if UNLIKELY (!m_hasKeymap) {
             r->error(ZWP_VIRTUAL_KEYBOARD_V1_ERROR_NO_KEYMAP, "Mods event received before a keymap was set");
             return;
@@ -72,8 +80,11 @@ CVirtualKeyboardV1Resource::CVirtualKeyboardV1Resource(SP<CZwpVirtualKeyboardV1>
     });
 
     m_resource->setKeymap([this](CZwpVirtualKeyboardV1* r, uint32_t fmt, int32_t fd, uint32_t len) {
-        auto            xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
         CFileDescriptor keymapFd{fd};
+        if (!enzuiAllowsVirtualKeyboardEvents(r->client()))
+            return;
+
+        auto xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
         if UNLIKELY (!xkbContext) {
             LOG(Log::ERR, "xkbContext creation failed");
             r->noMemory();

@@ -23,6 +23,7 @@
 #include "../protocols/LockNotify.hpp"
 #include "../protocols/SessionLock.hpp"
 #include "../protocols/InputMethodV2.hpp"
+#include "../protocols/EnzuiTextCommit.hpp"
 #include "../protocols/VirtualKeyboard.hpp"
 #include "../protocols/VirtualPointer.hpp"
 #include "../protocols/OutputManagement.hpp"
@@ -190,6 +191,7 @@ CProtocolManager::CProtocolManager() {
     PROTO::lockNotify          = makeUnique<CLockNotifyProtocol>(&hyprland_lock_notifier_v1_interface, 1, "IdleNotify");
     PROTO::sessionLock         = makeUnique<CSessionLockProtocol>(&ext_session_lock_manager_v1_interface, 1, "SessionLock");
     PROTO::ime                 = makeUnique<CInputMethodV2Protocol>(&zwp_input_method_manager_v2_interface, 1, "IMEv2");
+    PROTO::enzuiTextCommit     = makeUnique<CEnzuiTextCommitProtocol>(&enzui_text_commit_v1_interface, 1, "EnzuiTextCommit");
     PROTO::virtualKeyboard     = makeUnique<CVirtualKeyboardProtocol>(&zwp_virtual_keyboard_manager_v1_interface, 1, "VirtualKeyboard");
     PROTO::virtualPointer      = makeUnique<CVirtualPointerProtocol>(&zwlr_virtual_pointer_manager_v1_interface, 2, "VirtualPointer");
     PROTO::outputManagement    = makeUnique<COutputManagementProtocol>(&zwlr_output_manager_v1_interface, 4, "OutputManagement");
@@ -300,6 +302,7 @@ CProtocolManager::~CProtocolManager() {
     PROTO::lockNotify.reset();
     PROTO::sessionLock.reset();
     PROTO::ime.reset();
+    PROTO::enzuiTextCommit.reset();
     PROTO::virtualKeyboard.reset();
     PROTO::virtualPointer.reset();
     PROTO::outputManagement.reset();
@@ -416,14 +419,17 @@ bool CProtocolManager::isGlobalPrivileged(const wl_global* global) {
 // grant, the screen-sharing portal (capture and input capture), a helper
 // that portal starts itself such as the screenshot or colour picker tool
 // (capture), the remote desktop portal (input, after its own consent dialog)
-// or an approved input method (input method). Executable identity is the
-// inode of /proc/PID/exe, never a name; LD_PRELOAD and LD_AUDIT disqualify.
-// A session lock disconnects every admitted client but the shell and input
-// methods, and while locked nothing else is admitted.
+// or an approved input method (input method and its keyboard fallback).
+// Executable admission compares /proc/PID/exe against approved inodes and
+// disqualifies loader injection. Text commits use a separate allowlist.
+// Locking revokes capture and input connections other than the shell.
+// Input methods and text-commit clients keep their connections, with their
+// requests gated while locked.
 //
 // Compositor control requests and dev.enzui.* application ids need the same
 // kind of identity: see controlAllowed and enzuiAdmitAppId.
 #include "SessionLockManager.hpp"
+#include "input/InputManager.hpp"
 #include "../ipc/s1/S1.hpp"
 #include <sys/stat.h>
 #include <dirent.h>
@@ -452,7 +458,8 @@ namespace EnzuiAdmission {
             std::unordered_map<std::string, std::string> values;
             for (const auto* key :
                  {"ENZUI_PRIVILEGED_CLIENTS", "ENZUI_SHELL_EXE", "ENZUI_SHELL_LAUNCHER_PID", "ENZUI_SHELL_LAUNCHER_START", "ENZUI_SHELL_LAUNCHER_FD", "ENZUI_PORTAL_EXES",
-                  "ENZUI_PORTAL_INPUT_EXES", "ENZUI_PORTAL_HELPER_EXES", "ENZUI_DEV_PRIVILEGED_EXES", "ENZUI_CONTROL_EXES", "ENZUI_IME_EXES", "LD_LIBRARY_PATH"})
+                  "ENZUI_PORTAL_INPUT_EXES", "ENZUI_PORTAL_HELPER_EXES", "ENZUI_DEV_PRIVILEGED_EXES", "ENZUI_CONTROL_EXES", "ENZUI_IME_EXES",
+                  "ENZUI_TEXT_COMMIT_EXES", "LD_LIBRARY_PATH"})
                 values.emplace(key, getenv(key) ? getenv(key) : "");
             return values;
         }();
@@ -491,6 +498,7 @@ namespace EnzuiAdmission {
         KIND_INPUT         = 2,
         KIND_INPUT_METHOD  = 4,
         KIND_INPUT_CAPTURE = 8,
+        KIND_TEXT_COMMIT    = 16,
     };
 
     struct SProc {
@@ -535,10 +543,14 @@ namespace EnzuiAdmission {
         if (name == "zwlr_screencopy_manager_v1" || name == "hyprland_toplevel_export_manager_v1" || name == "ext_image_copy_capture_manager_v1" ||
             name == "ext_output_image_capture_source_manager_v1" || name == "ext_foreign_toplevel_image_capture_source_manager_v1")
             return KIND_CAPTURE;
-        if (name == "zwlr_virtual_pointer_manager_v1" || name == "zwp_virtual_keyboard_manager_v1")
+        if (name == "zwlr_virtual_pointer_manager_v1")
             return KIND_INPUT;
+        if (name == "zwp_virtual_keyboard_manager_v1")
+            return KIND_INPUT | KIND_INPUT_METHOD;
         if (name == "zwp_input_method_manager_v2")
             return KIND_INPUT_METHOD;
+        if (name == "enzui_text_commit_v1")
+            return KIND_TEXT_COMMIT;
         if (name == "hyprland_input_capture_manager_v1")
             return KIND_INPUT_CAPTURE;
         return 0;
@@ -812,6 +824,8 @@ namespace EnzuiAdmission {
                 kinds |= KIND_CAPTURE | KIND_INPUT | KIND_INPUT_METHOD | KIND_INPUT_CAPTURE;
             if (exeInList(pid, "ENZUI_IME_EXES"))
                 kinds |= KIND_INPUT_METHOD;
+            if (exeInList(pid, "ENZUI_TEXT_COMMIT_EXES"))
+                kinds |= KIND_TEXT_COMMIT;
             if (exeInList(pid, "ENZUI_PORTAL_INPUT_EXES") && portalOnSessionBus(pid))
                 kinds |= KIND_INPUT;
             if (exeInList(pid, "ENZUI_PORTAL_HELPER_EXES") && exeInList(proc.ppid, "ENZUI_PORTAL_EXES") && !injected(proc.ppid) && portalOnSessionBus(proc.ppid))
@@ -965,16 +979,41 @@ IPC::Socket1::SResponse enzuiDispatchControlPeer(int fd, std::string request, pi
     return handler(std::move(request), owner.pid == pid ? pid : 0);
 }
 
-bool enzuiAllowsGlobal(const wl_client* client, const wl_global* global) {
+bool enzuiAllowsTextCommit(const wl_client* client) {
+    return EnzuiAdmission::decide(client) & EnzuiAdmission::KIND_TEXT_COMMIT;
+}
+
+static bool enzuiLockBlocks(const wl_client* client) {
+    return g_pSessionLockManager && g_pSessionLockManager->isSessionLocked() && !EnzuiAdmission::isShell(client);
+}
+
+bool enzuiAllowsVirtualKeyboardEvents(const wl_client* client) {
     if (!EnzuiAdmission::enforcing())
         return true;
-    const auto kind = EnzuiAdmission::kindOf(global);
-    if (!kind)
-        return true;
-    // Input methods receive nothing while locked, so one starting then stays usable afterwards.
-    if (kind != EnzuiAdmission::KIND_INPUT_METHOD && g_pSessionLockManager && g_pSessionLockManager->isSessionLocked() && !EnzuiAdmission::isShell(client))
+    if (enzuiLockBlocks(client))
         return false;
-    return EnzuiAdmission::decide(client) & kind;
+
+    const auto KINDS = EnzuiAdmission::decide(client);
+    if (KINDS & EnzuiAdmission::KIND_INPUT)
+        return true;
+    if (!(KINDS & EnzuiAdmission::KIND_INPUT_METHOD))
+        return false;
+
+    const auto& RELAY = g_pInputManager->m_relay;
+    const auto IME = RELAY.m_inputMethod.lock();
+    return IME && IME->grabClient() == client;
+}
+
+bool enzuiAllowsGlobal(const wl_client* client, const wl_global* global) {
+    auto kind = EnzuiAdmission::kindOf(global);
+    if (kind == EnzuiAdmission::KIND_TEXT_COMMIT)
+        return enzuiAllowsTextCommit(client);
+    if (!EnzuiAdmission::enforcing() || !kind)
+        return true;
+    // Fcitx5 needs both globals at startup even when the seat is locked.
+    if (enzuiLockBlocks(client))
+        kind &= EnzuiAdmission::KIND_INPUT_METHOD;
+    return kind && (EnzuiAdmission::decide(client) & kind);
 }
 
 bool enzuiAllowsControl() {
@@ -998,7 +1037,7 @@ void enzuiRevokePrivileged() {
         return;
     std::vector<wl_client*> revoked;
     for (const auto& [client, entry] : EnzuiAdmission::admitted) {
-        if ((entry->kinds & ~EnzuiAdmission::KIND_INPUT_METHOD) && !EnzuiAdmission::isShell(client))
+        if ((entry->kinds & ~(EnzuiAdmission::KIND_INPUT_METHOD | EnzuiAdmission::KIND_TEXT_COMMIT)) && !EnzuiAdmission::isShell(client))
             revoked.push_back(const_cast<wl_client*>(client));
     }
     for (auto* client : revoked) {

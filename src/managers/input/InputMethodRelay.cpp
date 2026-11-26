@@ -48,10 +48,12 @@ void CInputMethodRelay::onNewIME(SP<CInputMethodV2> pIME) {
 
         LOG(Log::DEBUG, "IME Destroy");
 
-        if (PTI)
-            PTI->leave();
-
         m_inputMethod.reset();
+
+        if (PTI && PTI->isV3())
+            PTI->clearPreedit();
+        else if (PTI)
+            PTI->leave();
     });
 
     m_listeners.newPopup = pIME->m_events.newPopup.listen([this](const SP<CInputMethodPopupV2>& popup) {
@@ -66,11 +68,21 @@ void CInputMethodRelay::onNewIME(SP<CInputMethodV2> pIME) {
         if (ti->client() != Desktop::focusState()->surface()->client())
             continue;
 
-        if (ti->isV3())
-            ti->enter(Desktop::focusState()->surface());
-        else
+        if (!ti->isV3())
             ti->onEnabled(Desktop::focusState()->surface());
     }
+
+    const auto PTI = getFocusedTextInput();
+    if (PTI && PTI->isV3() && PTI->isEnabled())
+        activateIME(PTI);
+}
+
+bool CInputMethodRelay::commitText(std::string_view text, bool spaceBefore) {
+    if (!imeAllowed())
+        return false;
+
+    const auto INPUT = getFocusedTextInput();
+    return INPUT && INPUT->isV3() && INPUT->isEnabled() && !INPUT->onLockSurface() && INPUT->commitText(text, spaceBefore);
 }
 
 void CInputMethodRelay::removePopup(CInputPopup* pPopup) {
@@ -148,9 +160,6 @@ void CInputMethodRelay::commitIMEState(CTextInput* pInput) {
 }
 
 void CInputMethodRelay::onKeyboardFocus(SP<CWLSurfaceResource> pSurface) {
-    if (m_inputMethod.expired())
-        return;
-
     if (pSurface == m_lastKbFocus)
         return;
 

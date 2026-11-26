@@ -79,6 +79,8 @@ void CTextInputV3::enter(SP<CWLSurfaceResource> surf) {
 
 void CTextInputV3::leave(SP<CWLSurfaceResource> surf) {
     m_resource->sendLeave(surf->getResource()->resource());
+    m_pending = {};
+    m_current = {};
 }
 
 void CTextInputV3::preeditString(const std::string& text, int32_t cursorBegin, int32_t cursorEnd) {
