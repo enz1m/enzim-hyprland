@@ -1,4 +1,5 @@
 #include "FocusGrab.hpp"
+#include "../managers/SessionLockManager.hpp"
 #include "../Compositor.hpp"
 #include <hyprland-focus-grab-v1.hpp>
 #include "../managers/input/InputManager.hpp"
@@ -111,6 +112,16 @@ void CFocusGrab::refocusKeyboard() {
 }
 
 void CFocusGrab::commit(bool removeOnly) {
+    if (g_pSessionLockManager->forcesOpaqueLock()) {
+        if (m_grabActive)
+            finish(true);
+        else if (!m_surfaces.empty()) {
+            m_surfaces.clear();
+            m_resource->sendCleared();
+        }
+        return;
+    }
+
     auto surfacesChanged = false;
     auto anyCommitted    = false;
     for (auto iter = m_surfaces.begin(); iter != m_surfaces.end();) {

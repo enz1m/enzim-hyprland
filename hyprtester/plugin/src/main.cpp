@@ -11,6 +11,7 @@
 #include <src/pointer/PointerManager.hpp>
 #include <src/pointer/PointerController.hpp>
 #include <src/managers/SeatManager.hpp>
+#include <src/managers/SessionLockManager.hpp>
 #include <src/managers/input/trackpad/TrackpadGestures.hpp>
 #include <src/output/Monitor.hpp>
 #include <src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp>
@@ -398,6 +399,55 @@ static SDispatchResult testTitleBarPen() {
 
     if (BAR_DELIVERED || !CLIENT_DOWN || !CLIENT_UP)
         return {.success = false, .error = "Pen tip was delivered to the wrong owner"};
+    return {};
+}
+
+static SDispatchResult testPrivateLockInput() {
+    const auto WINDOW = Desktop::focusState()->window();
+    if (!WINDOW || g_pSessionLockManager->isSessionLocked())
+        return {.success = false, .error = "Expected a focused desktop window in an unlocked session"};
+
+    const auto MONITOR    = WINDOW->m_monitor.lock();
+    const auto SURFACE    = WINDOW->wlSurface()->resource();
+    const auto POINT      = WINDOW->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT).middle();
+    const auto POS        = (POINT - MONITOR->m_position) / MONITOR->m_size;
+    const auto TOUCH      = makeShared<CTestTouch>();
+    const auto DEVICE     = makeShared<CTestTablet>();
+    const auto TABLET     = CTablet::create(DEVICE);
+    TABLET->m_boundOutput = MONITOR->m_name;
+    const auto PEN        = makeShared<CTestPen>();
+    PEN->type             = Aquamarine::ITabletTool::AQ_TABLET_TOOL_TYPE_PEN;
+    const auto  TOOL      = g_pInputManager->ensureTabletToolPresent(PEN);
+    CScopeGuard cleanup([&] {
+        DEVICE->events.destroy.emit();
+        PEN->events.destroy.emit();
+    });
+
+    g_pInputManager->onTouchDown({.timeMs = 10, .touchID = 1, .pos = POS, .device = TOUCH});
+    g_pInputManager->onTabletProximity({.tool = PEN, .tablet = TABLET, .timeMs = 11, .proximity = POS, .in = true});
+    g_pInputManager->onTabletTip({.tool = PEN, .tablet = TABLET, .timeMs = 12, .tip = POS, .in = true});
+    if (g_pSeatManager->m_state.touchFocus != SURFACE || TOOL->getSurface() != SURFACE || !TOOL->m_isDown)
+        return {.success = false, .error = "Desktop did not own the touch and pen before locking"};
+
+    g_pSessionLockManager->armSleepCover();
+    if (g_pInputManager->m_touchData.touchFocusSurface || TOOL->getSurface() || TOOL->m_isDown || g_pSeatManager->m_touchLocks)
+        return {.success = false, .error = "A desktop contact survived lock entry"};
+
+    auto grab        = makeShared<CSeatGrab>();
+    grab->m_keyboard = true;
+    grab->m_pointer  = true;
+    grab->add(SURFACE);
+    g_pSeatManager->setGrab(grab);
+    g_pSeatManager->setKeyboardFocus(SURFACE);
+    g_pSeatManager->setPointerFocus(SURFACE, {});
+    g_pSeatManager->sendTouchDown(SURFACE, 20, 2, {});
+    g_pInputManager->onTouchDown({.timeMs = 21, .touchID = 3, .pos = POS, .device = TOUCH});
+    g_pInputManager->onTabletAxis({.tool = PEN, .tablet = TABLET, .timeMs = 22, .updatedAxes = CTablet::HID_TABLET_TOOL_AXIS_PRESSURE, .pressure = 0.5});
+    g_pInputManager->onTabletTip({.tool = PEN, .tablet = TABLET, .timeMs = 23, .tip = POS, .in = true});
+
+    if (g_pSeatManager->m_seatGrab || g_pSeatManager->m_state.keyboardFocus || g_pSeatManager->m_state.pointerFocus || g_pSeatManager->m_state.touchFocus || TOOL->getSurface())
+        return {.success = false, .error = "Desktop gained an input target with the private cover active"};
+
     return {};
 }
 
@@ -1225,6 +1275,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     addLuaFn("test_drag_lifecycle", ::luaTestDragLifecycle);
     addLuaFn("test_title_bar_touch", [](lua_State* L) { return luaResult(L, ::testTitleBarTouch()); });
     addLuaFn("test_title_bar_pen", [](lua_State* L) { return luaResult(L, ::testTitleBarPen()); });
+    addLuaFn("test_private_lock_input", [](lua_State* L) { return luaResult(L, ::testPrivateLockInput()); });
     addLuaFn("test_pinch_delta_scale", ::luaTestPinchDeltaScale);
     addLuaFn("vkb", ::luaVkb);
     addLuaFn("alt", ::luaAlt);

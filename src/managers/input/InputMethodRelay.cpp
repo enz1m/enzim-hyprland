@@ -126,7 +126,7 @@ void CInputMethodRelay::updateAllPopups() {
 
 // Lock-screen fields and keys typed while locked never reach the input method.
 bool CInputMethodRelay::imeAllowed() const {
-    return !g_pSessionLockManager || !g_pSessionLockManager->isSessionLocked();
+    return !g_pSessionLockManager || (!g_pSessionLockManager->isSessionLocked() && !g_pSessionLockManager->forcesOpaqueLock());
 }
 
 void CInputMethodRelay::activateIME(CTextInput* pInput, bool shouldCommit) {

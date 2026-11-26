@@ -35,11 +35,14 @@ namespace Monitor {
             bool                                     renderedLocked    = false;
             std::optional<uint32_t>                  previousFormat;
             uint64_t                                 id = 0;
+            uint64_t                                 coverGeneration = 0;
+            SP<Aquamarine::IBuffer>                  privateBuffer;
         };
 
         struct SStagedRender {
             CRegion damage;
             bool    copyFBPrepared = false;
+            uint64_t coverGeneration = 0;
             bool    renderedLocked = false;
         };
 
@@ -52,7 +55,7 @@ namespace Monitor {
         bool                         ownsCommit(uint64_t id) const;
         bool                         shouldForwardCommitEvent() const;
         bool                         deferStateCommit();
-        void                         stageRenderedDamage(const CRegion& damage, bool copyFBPrepared);
+        void                         stageRenderedDamage(const CRegion& damage, bool copyFBPrepared, uint64_t coverGeneration);
         std::optional<SStagedRender> takeStagedRender();
         eSubmitResult                submit(SFrame&& frame);
         void                         onCommitResult(const Aquamarine::IOutput::SCommitResult& result);

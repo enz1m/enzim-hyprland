@@ -62,6 +62,7 @@ class CSessionLock {
     SP<CExtSessionLockV1> m_resource;
 
     bool                  m_inert = false;
+    bool                  m_acknowledged = false;
 
     friend class CSessionLockProtocol;
 };
@@ -73,6 +74,7 @@ class CSessionLockProtocol : public IWaylandProtocol {
     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
 
     bool         isLocked();
+    void         beginLock();
     void         forceUnlock();
     void         forceLock();
 

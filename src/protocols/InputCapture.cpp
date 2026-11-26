@@ -213,7 +213,7 @@ void CInputCaptureResource::onClearBarriers() {
 }
 
 bool CInputCaptureResource::activate(double x, double y, uint32_t borderId) {
-    if (m_status != CLIENT_STATUS_ENABLED || (g_pSessionLockManager && g_pSessionLockManager->isSessionLocked()))
+    if (m_status != CLIENT_STATUS_ENABLED || (g_pSessionLockManager && (g_pSessionLockManager->isSessionLocked() || g_pSessionLockManager->forcesOpaqueLock())))
         return false;
 
     const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_INPUT_CAPTURE);

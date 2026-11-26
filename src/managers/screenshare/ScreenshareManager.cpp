@@ -1,3 +1,4 @@
+#include "../../render/OpenGL.hpp"
 #include "ScreenshareManager.hpp"
 #include "../../render/Renderer.hpp"
 #include "../../Compositor.hpp"
@@ -10,6 +11,28 @@ using namespace Screenshare;
 
 CScreenshareManager::CScreenshareManager() {
     ;
+}
+
+void CScreenshareManager::suspendCapture() {
+    auto pending = std::exchange(m_pendingFrames, {});
+    // Client-owned DMA buffers must have no queued desktop writes past this transition.
+    if (const auto gl = g_pHyprRenderer->glBackend()) {
+        gl->makeEGLCurrent();
+        glFinish();
+    }
+
+    for (const auto& session : m_sessions) {
+        if (session)
+            session->m_tempFB.reset();
+    }
+
+    for (const auto& frame : pending) {
+        if (!frame || frame->done())
+            continue;
+        frame->m_failed = true;
+        if (auto callback = std::exchange(frame->m_callback, {}))
+            callback(RESULT_NOT_COPIED);
+    }
 }
 
 void CScreenshareManager::onOutputCommit(PHLMONITOR monitor, const CRegion& damage) {
@@ -39,7 +62,7 @@ void CScreenshareManager::onOutputCommit(PHLMONITOR monitor, const CRegion& dama
         if (frame.expired() || !frame->m_shared || frame->done())
             return;
 
-        if (frame->m_session->monitor() != monitor || g_pSessionLockManager->isSessionLocked())
+        if (frame->m_session->monitor() != monitor || g_pSessionLockManager->isSessionLocked() || g_pSessionLockManager->forcesOpaqueLock())
             return;
 
         if (frame->m_session->m_type == SHARE_WINDOW) {
@@ -102,6 +125,9 @@ UP<CScreenshareSession> CScreenshareManager::newSession(wl_client* client, PHLWI
 }
 
 UP<CCursorshareSession> CScreenshareManager::newCursorSession(wl_client* client, WP<CWLPointerResource> pointer) {
+    if (g_pSessionLockManager->isSessionLocked() || g_pSessionLockManager->forcesOpaqueLock())
+        return nullptr;
+
     UP<CCursorshareSession> session = UP<CCursorshareSession>(new CCursorshareSession(client, pointer));
 
     session->m_self = session;

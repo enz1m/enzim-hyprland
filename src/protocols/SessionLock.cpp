@@ -1,4 +1,5 @@
 #include "SessionLock.hpp"
+#include "../managers/SessionLockManager.hpp"
 #include "../managers/SeatManager.hpp"
 #include "FractionalScale.hpp"
 #include "LockNotify.hpp"
@@ -106,6 +107,8 @@ SP<CWLSurfaceResource> CSessionLockSurface::surface() {
     return m_surface.lock();
 }
 
+bool enzuiAllowsLocker(const wl_client* client);
+
 CSessionLock::CSessionLock(SP<CExtSessionLockV1> resource_) : m_resource(resource_) {
     if UNLIKELY (!m_resource->resource())
         return;
@@ -128,9 +131,16 @@ CSessionLock::CSessionLock(SP<CExtSessionLockV1> resource_) : m_resource(resourc
             return;
         }
 
-        PROTO::sessionLock->m_locked = false;
+        // A managed lock stays locked if its locker unlocks before it was told the outputs are private.
+        if (!m_acknowledged && g_pSessionLockManager->managedLock()) {
+            PROTO::sessionLock->destroyResource(this);
+            return;
+        }
 
-        PROTO::lockNotify->onUnlocked();
+        if (!g_pSessionLockManager->blocksUnlock()) {
+            PROTO::sessionLock->m_locked = false;
+            PROTO::lockNotify->onUnlocked();
+        }
 
         m_events.unlockAndDestroy.emit();
 
@@ -148,6 +158,7 @@ CSessionLock::~CSessionLock() {
 }
 
 void CSessionLock::sendLocked() {
+    m_acknowledged = true;
     m_resource->sendLocked();
     PROTO::lockNotify->onLocked();
 }
@@ -198,9 +209,11 @@ void CSessionLockProtocol::onLock(CExtSessionLockManagerV1* pMgr, uint32_t id) {
         return;
     }
 
+    if (!enzuiAllowsLocker(CLIENT)) {
+        RESOURCE->sendDenied();
+        return;
+    }
     m_events.newLock.emit(RESOURCE);
-
-    m_locked = true;
 }
 
 void CSessionLockProtocol::onGetLockSurface(CExtSessionLockV1* lock, uint32_t id, wl_resource* surface, wl_resource* output) {
@@ -238,6 +251,10 @@ bool CSessionLockProtocol::isLocked() {
     return m_locked;
 }
 
+void CSessionLockProtocol::beginLock() {
+    m_locked = true;
+}
+
 void CSessionLockProtocol::forceUnlock() {
     m_locked = false;
 
@@ -250,10 +267,6 @@ void CSessionLockProtocol::forceUnlock() {
 
 void CSessionLockProtocol::forceLock() {
     m_locked = true;
-
-    for (const auto& l : m_locks) {
-        l->sendLocked();
-    }
 
     PROTO::lockNotify->onLocked();
 }

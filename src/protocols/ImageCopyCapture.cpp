@@ -1,5 +1,6 @@
 #include "ImageCopyCapture.hpp"
 #include "../managers/screenshare/ScreenshareManager.hpp"
+#include "../managers/SessionLockManager.hpp"
 #include "../managers/permissions/DynamicPermissionManager.hpp"
 #include "../pointer/PointerManager.hpp"
 #include "./core/Seat.hpp"
@@ -102,12 +103,11 @@ CImageCopyCaptureCursorSession::CImageCopyCaptureCursorSession(SP<CExtImageCopyC
     if (!m_source || (!m_source->m_monitor && !m_source->m_window))
         return;
 
-    const auto PMONITOR = m_source->m_monitor.expired() ? m_source->m_window->m_monitor.lock() : m_source->m_monitor.lock();
-
-    // TODO: add listeners for source being destroyed
+    const auto PMONITOR = m_source->m_window ? m_source->m_window->m_monitor.lock() : m_source->m_monitor.lock();
 
     sendCursorEvents();
-    m_listeners.commit = PMONITOR->m_events.commit.listen([this, PMONITOR]() { sendCursorEvents(); });
+    if (PMONITOR)
+        m_listeners.commit = PMONITOR->m_events.commit.listen([this] { sendCursorEvents(); });
 
     m_resource->setDestroy([this](CExtImageCopyCaptureCursorSessionV1* pMgr) { PROTO::imageCopyCapture->destroyResource(this); });
     m_resource->setOnDestroy([this](CExtImageCopyCaptureCursorSessionV1* pMgr) { PROTO::imageCopyCapture->destroyResource(this); });
@@ -143,10 +143,9 @@ CImageCopyCaptureCursorSession::CImageCopyCaptureCursorSession(SP<CExtImageCopyC
             return;
         }
 
-        sendConstraints();
-
         m_listeners.constraintsChanged = m_session->m_events.constraintsChanged.listen([this]() { sendConstraints(); });
-        m_listeners.stopped            = m_session->m_events.stopped.listen([this]() { destroyCaptureSession(); });
+        m_listeners.stopped            = m_session->m_events.stopped.listen([this] { stopCapture(); });
+        sendConstraints();
     });
 }
 
@@ -158,12 +157,22 @@ bool CImageCopyCaptureCursorSession::good() {
     return m_resource && m_resource->resource();
 }
 
+void CImageCopyCaptureCursorSession::suspend() {
+    sendCursorEvents();
+    if (m_session)
+        m_session->stop();
+}
+
+void CImageCopyCaptureCursorSession::stopCapture() {
+    if (m_sessionResource && m_sessionResource->resource())
+        m_sessionResource->sendStopped();
+    if (m_frameResource && m_frameResource->resource() && !std::exchange(m_frameFinished, true))
+        m_frameResource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED);
+}
+
 void CImageCopyCaptureCursorSession::destroyCaptureSession() {
     m_listeners.constraintsChanged.reset();
     m_listeners.stopped.reset();
-
-    if (m_frameResource && m_frameResource->resource())
-        m_frameResource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED);
     m_frameResource.reset();
 
     m_sessionResource.reset();
@@ -172,6 +181,7 @@ void CImageCopyCaptureCursorSession::destroyCaptureSession() {
 
 void CImageCopyCaptureCursorSession::createFrame(SP<CExtImageCopyCaptureFrameV1> resource) {
     m_frameResource = resource;
+    m_frameFinished = false;
     m_captured      = false;
     m_buffer.reset();
 
@@ -231,25 +241,33 @@ void CImageCopyCaptureCursorSession::createFrame(SP<CExtImageCopyCaptureFrameV1>
             return;
         }
 
-        const auto PMONITOR = m_source->m_monitor.expired() ? m_source->m_window->m_monitor.lock() : m_source->m_monitor.lock();
+        const auto PMONITOR = m_source->m_window ? m_source->m_window->m_monitor.lock() : m_source->m_monitor.lock();
 
-        auto       sourceBoxCallback = [this]() { return m_source ? m_source->logicalBox() : CBox(); };
-        auto       error             = m_session->share(PMONITOR, m_buffer, sourceBoxCallback, [this](eScreenshareResult result) {
-            switch (result) {
-                case RESULT_COPIED: m_frameResource->sendReady(); break;
-                case RESULT_NOT_COPIED: m_frameResource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN); break;
-                case RESULT_TIMESTAMP:
-                    auto [sec, nsec] = Time::secNsec(Time::steadyNow());
-                    uint32_t tvSecHi = (sizeof(sec) > 4) ? sec >> 32 : 0;
-                    uint32_t tvSecLo = sec & 0xFFFFFFFF;
-                    m_frameResource->sendPresentationTime(tvSecHi, tvSecLo, nsec);
-                    break;
-            }
-        });
+        auto       sourceBoxCallback = [source = WP<CImageCaptureSource>{m_source}] { return source ? source->logicalBox() : CBox(); };
+        auto       error =
+            m_session->share(PMONITOR, m_buffer, sourceBoxCallback, [session = m_self, frame = WP<CExtImageCopyCaptureFrameV1>{m_frameResource}](eScreenshareResult result) {
+                const auto self     = session.lock();
+                const auto resource = frame.lock();
+                if (!self || !resource || !resource->resource() || self->m_frameResource != resource || self->m_frameFinished)
+                    return;
 
-        if (!m_frameResource)
+                self->m_frameFinished = result != RESULT_TIMESTAMP;
+                switch (result) {
+                    case RESULT_COPIED: resource->sendReady(); break;
+                    case RESULT_NOT_COPIED: resource->sendFailed(EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN); break;
+                    case RESULT_TIMESTAMP:
+                        auto [sec, nsec] = Time::secNsec(Time::steadyNow());
+                        uint32_t tvSecHi = (sizeof(sec) > 4) ? sec >> 32 : 0;
+                        uint32_t tvSecLo = sec & 0xFFFFFFFF;
+                        resource->sendPresentationTime(tvSecHi, tvSecLo, nsec);
+                        break;
+                }
+            });
+
+        if (!m_frameResource || m_frameFinished)
             return;
 
+        m_frameFinished = error != ERROR_NONE;
         switch (error) {
             case ERROR_NONE: m_captured = true; break;
             case ERROR_NO_BUFFER:
@@ -305,13 +323,20 @@ void CImageCopyCaptureCursorSession::sendConstraints() {
 }
 
 void CImageCopyCaptureCursorSession::sendCursorEvents() {
+    if (!good() || !m_source)
+        return;
+    if (g_pSessionLockManager->isSessionLocked() || g_pSessionLockManager->forcesOpaqueLock()) {
+        if (std::exchange(m_entered, false))
+            m_resource->sendLeave();
+        return;
+    }
+
     const auto PERM = g_pDynamicPermissionManager->clientPermissionMode(m_resource->client(), PERMISSION_TYPE_CURSOR_POS);
     if (PERM != PERMISSION_RULE_ALLOW_MODE_ALLOW)
         return;
 
-    const auto PMONITOR  = m_source->m_monitor.expired() ? m_source->m_window->m_monitor.lock() : m_source->m_monitor.lock();
-    CBox       sourceBox = m_source->logicalBox();
-    bool       overlaps  = Pointer::mgr()->getCursorBoxGlobal().overlaps(sourceBox);
+    CBox sourceBox = m_source->logicalBox();
+    bool overlaps  = Pointer::mgr()->getCursorBoxGlobal().overlaps(sourceBox);
 
     if (m_entered && !overlaps) {
         m_entered = false;
@@ -480,11 +505,17 @@ void CImageCopyCaptureProtocol::bindManager(wl_client* client, void* data, uint3
         if (PERM == PERMISSION_RULE_ALLOW_MODE_DENY)
             return;
 
-        m_cursorSessions.emplace_back(makeShared<CImageCopyCaptureCursorSession>(makeShared<CExtImageCopyCaptureCursorSessionV1>(pMgr->client(), pMgr->version(), id), source,
-                                                                                 CWLPointerResource::fromResource(pointer_)));
+        auto& cursor   = m_cursorSessions.emplace_back(makeShared<CImageCopyCaptureCursorSession>(
+            makeShared<CExtImageCopyCaptureCursorSessionV1>(pMgr->client(), pMgr->version(), id), source, CWLPointerResource::fromResource(pointer_)));
+        cursor->m_self = cursor;
 
         LOG(Log::INFO, "New image copy capture cursor session for source ({}): \"{}\"", source->getTypeName(), source->getName());
     });
+}
+
+void CImageCopyCaptureProtocol::suspendCursorCapture() {
+    for (const auto& cursor : m_cursorSessions)
+        cursor->suspend();
 }
 
 void CImageCopyCaptureProtocol::destroyResource(CExtImageCopyCaptureManagerV1* resource) {

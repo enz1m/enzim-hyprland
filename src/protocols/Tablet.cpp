@@ -1,3 +1,4 @@
+#include "../managers/SessionLockManager.hpp"
 #include "Tablet.hpp"
 #include "../devices/Tablet.hpp"
 #include "../Compositor.hpp"
@@ -155,7 +156,8 @@ CTabletToolV2Resource::CTabletToolV2Resource(SP<CZwpTabletToolV2> resource_, SP<
     m_resource->setOnDestroy([this](CZwpTabletToolV2* r) { PROTO::tablet->destroyResource(this); });
 
     m_resource->setSetCursor([](CZwpTabletToolV2* r, uint32_t serial, wl_resource* surf, int32_t hot_x, int32_t hot_y) {
-        if (!g_pSeatManager->m_state.pointerFocusResource || g_pSeatManager->m_state.pointerFocusResource->client() != r->client())
+        if (!g_pSeatManager->m_state.pointerFocusResource || g_pSeatManager->m_state.pointerFocusResource->client() != r->client() ||
+            !g_pSessionLockManager->allowsInput(g_pSeatManager->m_state.pointerFocus.lock()))
             return;
 
         g_pInputManager->processMouseRequest(CSeatManager::SSetCursorEvent{surf ? CWLSurfaceResource::fromResource(surf) : nullptr, {hot_x, hot_y}});
@@ -457,7 +459,7 @@ void CTabletV2Protocol::recheckRegisteredDevices() {
 
 void CTabletV2Protocol::pressure(SP<CTabletTool> tool, double value) {
     for (auto const& t : m_tools) {
-        if (t->m_tool != tool || !t->m_current)
+        if (t->m_tool != tool || !t->m_current || !g_pSessionLockManager->allowsInput(t->m_lastSurf.lock()))
             continue;
 
         t->m_resource->sendPressure(std::clamp(value * 65535, 0.0, 65535.0));
@@ -467,7 +469,7 @@ void CTabletV2Protocol::pressure(SP<CTabletTool> tool, double value) {
 
 void CTabletV2Protocol::distance(SP<CTabletTool> tool, double value) {
     for (auto const& t : m_tools) {
-        if (t->m_tool != tool || !t->m_current)
+        if (t->m_tool != tool || !t->m_current || !g_pSessionLockManager->allowsInput(t->m_lastSurf.lock()))
             continue;
 
         t->m_resource->sendDistance(std::clamp(value * 65535, 0.0, 65535.0));
@@ -477,7 +479,7 @@ void CTabletV2Protocol::distance(SP<CTabletTool> tool, double value) {
 
 void CTabletV2Protocol::rotation(SP<CTabletTool> tool, double value) {
     for (auto const& t : m_tools) {
-        if (t->m_tool != tool || !t->m_current)
+        if (t->m_tool != tool || !t->m_current || !g_pSessionLockManager->allowsInput(t->m_lastSurf.lock()))
             continue;
 
         t->m_resource->sendRotation(wl_fixed_from_double(value));
@@ -487,7 +489,7 @@ void CTabletV2Protocol::rotation(SP<CTabletTool> tool, double value) {
 
 void CTabletV2Protocol::slider(SP<CTabletTool> tool, double value) {
     for (auto const& t : m_tools) {
-        if (t->m_tool != tool || !t->m_current)
+        if (t->m_tool != tool || !t->m_current || !g_pSessionLockManager->allowsInput(t->m_lastSurf.lock()))
             continue;
 
         t->m_resource->sendSlider(std::clamp(value * 65535, -65535.0, 65535.0));
@@ -497,7 +499,7 @@ void CTabletV2Protocol::slider(SP<CTabletTool> tool, double value) {
 
 void CTabletV2Protocol::wheel(SP<CTabletTool> tool, double value) {
     for (auto const& t : m_tools) {
-        if (t->m_tool != tool || !t->m_current)
+        if (t->m_tool != tool || !t->m_current || !g_pSessionLockManager->allowsInput(t->m_lastSurf.lock()))
             continue;
 
         t->m_resource->sendWheel(wl_fixed_from_double(value), 0);
@@ -507,7 +509,7 @@ void CTabletV2Protocol::wheel(SP<CTabletTool> tool, double value) {
 
 void CTabletV2Protocol::tilt(SP<CTabletTool> tool, const Vector2D& value) {
     for (auto const& t : m_tools) {
-        if (t->m_tool != tool || !t->m_current)
+        if (t->m_tool != tool || !t->m_current || !g_pSessionLockManager->allowsInput(t->m_lastSurf.lock()))
             continue;
 
         t->m_resource->sendTilt(wl_fixed_from_double(value.x), wl_fixed_from_double(value.y));
@@ -527,7 +529,7 @@ void CTabletV2Protocol::up(SP<CTabletTool> tool) {
 
 void CTabletV2Protocol::down(SP<CTabletTool> tool) {
     for (auto const& t : m_tools) {
-        if (t->m_tool != tool || !t->m_current)
+        if (t->m_tool != tool || !t->m_current || !g_pSessionLockManager->allowsInput(t->m_lastSurf.lock()))
             continue;
 
         auto serial = g_pSeatManager->nextSerial(g_pSeatManager->seatResourceForClient(t->m_resource->client()));
@@ -537,6 +539,8 @@ void CTabletV2Protocol::down(SP<CTabletTool> tool) {
 }
 
 void CTabletV2Protocol::proximityIn(SP<CTabletTool> tool, SP<CTablet> tablet, SP<CWLSurfaceResource> surf) {
+    if (!g_pSessionLockManager->allowsInput(surf))
+        return;
     proximityOut(tool);
     const auto                CLIENT = surf->client();
 
@@ -598,7 +602,7 @@ void CTabletV2Protocol::proximityOut(SP<CTabletTool> tool) {
 
 void CTabletV2Protocol::buttonTool(SP<CTabletTool> tool, uint32_t button, uint32_t state) {
     for (auto const& t : m_tools) {
-        if (t->m_tool != tool || !t->m_current)
+        if (t->m_tool != tool || !t->m_current || !g_pSessionLockManager->allowsInput(t->m_lastSurf.lock()))
             continue;
 
         auto serial = g_pSeatManager->nextSerial(g_pSeatManager->seatResourceForClient(t->m_resource->client()));
@@ -609,7 +613,7 @@ void CTabletV2Protocol::buttonTool(SP<CTabletTool> tool, uint32_t button, uint32
 
 void CTabletV2Protocol::motion(SP<CTabletTool> tool, const Vector2D& value) {
     for (auto const& t : m_tools) {
-        if (t->m_tool != tool || !t->m_current)
+        if (t->m_tool != tool || !t->m_current || !g_pSessionLockManager->allowsInput(t->m_lastSurf.lock()))
             continue;
 
         t->m_resource->sendMotion(wl_fixed_from_double(value.x), wl_fixed_from_double(value.y));
@@ -619,7 +623,9 @@ void CTabletV2Protocol::motion(SP<CTabletTool> tool, const Vector2D& value) {
 
 void CTabletV2Protocol::mode(SP<CTabletPad> pad, uint32_t group, uint32_t mode, uint32_t timeMs) {
     for (auto const& t : m_pads) {
-        if (t->m_pad != pad)
+        if (t->m_pad != pad ||
+            (g_pSessionLockManager->forcesOpaqueLock() &&
+             (!g_pSessionLockManager->allowsInput(g_pSeatManager->m_state.keyboardFocus.lock()) || t->m_resource->client() != g_pSeatManager->m_state.keyboardFocus->client())))
             continue;
         if (t->m_groups.size() <= group) {
             LOG(Log::ERR, "BUG THIS: group >= t->groups.size()");
@@ -632,7 +638,9 @@ void CTabletV2Protocol::mode(SP<CTabletPad> pad, uint32_t group, uint32_t mode, 
 
 void CTabletV2Protocol::buttonPad(SP<CTabletPad> pad, uint32_t button, uint32_t timeMs, uint32_t state) {
     for (auto const& t : m_pads) {
-        if (t->m_pad != pad)
+        if (t->m_pad != pad ||
+            (g_pSessionLockManager->forcesOpaqueLock() &&
+             (!g_pSessionLockManager->allowsInput(g_pSeatManager->m_state.keyboardFocus.lock()) || t->m_resource->client() != g_pSeatManager->m_state.keyboardFocus->client())))
             continue;
         t->m_resource->sendButton(timeMs, button, zwpTabletToolV2ButtonState{state});
     }

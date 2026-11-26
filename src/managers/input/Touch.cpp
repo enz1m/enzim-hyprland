@@ -51,6 +51,17 @@ void CInputManager::onTouchDown(ITouch::SDownEvent e) {
 
     refocus(TOUCH_COORDS);
 
+    if (g_pSessionLockManager->forcesOpaqueLock()) {
+        const auto LOCK = g_pSessionLockManager->getSessionLockSurfaceForMonitor(PMONITOR->m_id);
+        if (!LOCK)
+            return;
+        m_touchData.touchFocusLockSurface = LOCK;
+        const auto SURFACE                = LOCK->pWlrSurface.lock();
+        m_touchData.touchFocusSurface     = SURFACE;
+        g_pSeatManager->sendTouchDown(SURFACE, e.timeMs, e.touchID, TOUCH_COORDS - PMONITOR->m_position, USER_PRESS);
+        return;
+    }
+
     if (m_clickBehavior == CLICKMODE_KILL) {
         IPointer::SButtonEvent e;
         e.state = WL_POINTER_BUTTON_STATE_PRESSED;
@@ -89,9 +100,8 @@ void CInputManager::onTouchDown(ITouch::SDownEvent e) {
     if (g_pSessionLockManager->isSessionLocked() && m_foundLSToFocus.expired()) {
         m_touchData.touchFocusLockSurface = g_pSessionLockManager->getSessionLockSurfaceForMonitor(PMONITOR->m_id);
         if (!m_touchData.touchFocusLockSurface)
-            LOG(Log::WARN, "The session is locked but can't find a lock surface");
-        else
-            m_touchData.touchFocusSurface = m_touchData.touchFocusLockSurface->surface->surface();
+            return;
+        m_touchData.touchFocusSurface = m_touchData.touchFocusLockSurface->pWlrSurface;
     } else {
         if (m_foundSurfaceToFocus.expired())
             return;
@@ -206,7 +216,9 @@ void CInputManager::onTouchMove(ITouch::SMotionEvent e, const SP<ITouch>& device
         return;
     }
     if (m_touchData.touchFocusLockSurface) {
-        const auto PMONITOR     = State::monitorState()->query().id(m_touchData.touchFocusLockSurface->iMonitorID).run();
+        const auto PMONITOR = State::monitorState()->query().id(m_touchData.touchFocusLockSurface->iMonitorID).run();
+        if (!PMONITOR)
+            return;
         const auto TOUCH_COORDS = PMONITOR->m_position + (e.pos * PMONITOR->m_size);
         const auto LOCAL        = TOUCH_COORDS - PMONITOR->m_position;
         g_pSeatManager->sendTouchMotion(e.timeMs, e.touchID, LOCAL);

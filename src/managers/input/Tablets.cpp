@@ -22,6 +22,22 @@ static void unfocusTool(SP<CTabletTool> tool) {
     PROTO::tablet->proximityOut(tool);
 }
 
+void CInputManager::cancelPrivateInputContacts() {
+    for (const auto& device : m_touches)
+        CHyprTitleBarDecoration::cancelContacts(device.get());
+
+    for (const auto& tool : m_tabletTools) {
+        CHyprTitleBarDecoration::endContact({tool.get(), 0}, std::nullopt, 0, true);
+        if (tool->getSurface())
+            unfocusTool(tool);
+        else
+            PROTO::tablet->proximityOut(tool);
+        tool->m_isDown = false;
+        tool->m_buttonsDown.clear();
+    }
+    m_touchData = {};
+}
+
 static void focusTool(SP<CTabletTool> tool, SP<CTablet> tablet, SP<CWLSurfaceResource> surf) {
     if (tool->getSurface() == surf || !surf)
         return;

@@ -4,6 +4,7 @@
 #include "../render/Renderer.hpp"
 #include "../managers/eventLoop/EventLoopManager.hpp"
 #include "OutputCommitCoordinator.hpp"
+#include "../managers/SessionLockManager.hpp"
 
 using namespace Render::GL;
 using namespace Monitor;
@@ -12,10 +13,18 @@ CMonitorFrameScheduler::CMonitorFrameScheduler(PHLMONITOR m) : m_monitor(m) {
     ;
 }
 
+void CMonitorFrameScheduler::reset() {
+    ++m_generation;
+    m_sync.reset();
+    m_renderAtFrame = true;
+    m_pendingThird  = false;
+}
+
 bool CMonitorFrameScheduler::newSchedulingEnabled() {
     static auto PENABLENEW = CConfigValue<Config::INTEGER>("render:new_render_scheduling");
 
-    return *PENABLENEW && g_pHyprRenderer->explicitSyncSupported() && m_monitor && !m_monitor->m_directScanoutIsActive && (!m_monitor->m_commitCoordinator->asyncEnabled());
+    return !g_pSessionLockManager->isSessionLocked() && !g_pSessionLockManager->forcesOpaqueLock() && *PENABLENEW && g_pHyprRenderer->explicitSyncSupported() && m_monitor &&
+        !m_monitor->m_directScanoutIsActive && (!m_monitor->m_commitCoordinator->asyncEnabled());
 }
 
 void CMonitorFrameScheduler::onSyncFired() {
@@ -67,8 +76,8 @@ void CMonitorFrameScheduler::onPresented() {
 
     LOG(Log::TRACE, "CMonitorFrameScheduler: {} -> onPresented, missed, committing pending at the earliest convenience.", PMONITOR->m_name);
 
-    g_pEventLoopManager->doLater([m = PHLMONITORREF{PMONITOR}] {
-        if (!m || !m->m_output)
+    g_pEventLoopManager->doLater([m = PHLMONITORREF{PMONITOR}, self = m_self, generation = m_generation] {
+        if (!self || self->m_generation != generation || !m || !m->m_output)
             return;
 
         auto ml = m.lock();
@@ -84,7 +93,7 @@ void CMonitorFrameScheduler::onPresented() {
 
 void CMonitorFrameScheduler::onFrame() {
     const auto PMONITOR = m_monitor.lock();
-    if (!PMONITOR || !canRender())
+    if (!PMONITOR || !PMONITOR->m_output || !canRender())
         return;
 
     PMONITOR->recheckSolitary();
@@ -137,8 +146,8 @@ void CMonitorFrameScheduler::onFinishRender() {
         return;
     }
 
-    g_pEventLoopManager->doOnReadable(m_sync->fd().duplicate(), [this, self = m_self] {
-        if (!self) // might've gotten destroyed
+    g_pEventLoopManager->doOnReadable(m_sync->fd().duplicate(), [this, self = m_self, generation = m_generation] {
+        if (!self || generation != m_generation)
             return;
         onSyncFired();
     });

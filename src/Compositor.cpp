@@ -353,6 +353,9 @@ void CCompositor::initServer(std::string socketName, int socketFd) {
         throwError("CBackend::create() failed!");
     }
 
+    if (Env::envEnabled("ENZUI_MANAGED_LOCK") && !m_aqBackend->canConfirmPrivatePresentation())
+        throwError("Managed session locking requires wp_presentation from the Wayland host");
+
     m_initialized = true;
 
     LOG(Log::DEBUG, "Instance Signature: {}", m_instanceSignature);

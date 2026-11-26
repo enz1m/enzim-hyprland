@@ -114,6 +114,8 @@ CMonitor::~CMonitor() {
 }
 
 void CMonitor::onConnect(bool noRule) {
+    if (g_pSessionLockManager)
+        setPrivateScanout(g_pSessionLockManager->forcesOpaqueLock());
     Event::bus()->m_events.monitor.preAdded.emit(m_self.lock());
     CScopeGuard x = {[]() { State::monitorLayoutController()->arrange(); }};
 
@@ -127,15 +129,27 @@ void CMonitor::onConnect(bool noRule) {
             [](PHLWORKSPACE ws, PHLMONITOR mon, bool noWarp) { State::Workspace::placementController()->moveWorkspaceToMonitor(ws, mon, noWarp); });
     });
 
-    m_listeners.frame        = m_output->events.frame.listen([this] {
+    m_listeners.frame              = m_output->events.frame.listen([this] {
         if (m_frameScheduler)
             m_frameScheduler->onFrame();
     });
-    m_listeners.commit       = m_output->events.commit.listen([this] {
+    m_listeners.commit             = m_output->events.commit.listen([this] {
         if (!m_commitCoordinator->shouldForwardCommitEvent())
             return;
 
         m_events.commit.emit();
+        if (m_output->privateScanout)
+            g_pEventLoopManager->doLater([] {
+                if (g_pSessionLockManager)
+                    g_pSessionLockManager->maybeAcknowledgePrivateLock();
+            });
+    });
+    m_listeners.scanoutInvalidated = m_output->events.scanoutInvalidated.listen([this] { invalidatePrivatePresentation(); });
+    m_listeners.privatePresented   = m_output->events.privatePresented.listen([this](uint64_t serial) {
+        if (!m_output->privateScanout || serial != m_privateEpoch)
+            return;
+        m_presentedPrivateEpoch = serial;
+        g_pSessionLockManager->maybeAcknowledgePrivateLock();
     });
     m_listeners.commitResult = m_output->events.commitResult.listen([this](const Aquamarine::IOutput::SCommitResult& result) { m_commitCoordinator->onCommitResult(result); });
     m_listeners.needsFrame   = m_output->events.needsFrame.listen([this] { scheduleFrame(Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME); });
@@ -209,7 +223,8 @@ void CMonitor::onConnect(bool noRule) {
                 g_pHyprRenderer->sendFrameEventsToWorkspace(mon, m_activeSpecialWorkspace, NOW);
         }
 
-        m_frameScheduler->onPresented();
+        if (m_frameScheduler)
+            m_frameScheduler->onPresented();
 
         m_events.presented.emit(Time::fromTimespec(&ts));
     });
@@ -225,6 +240,8 @@ void CMonitor::onConnect(bool noRule) {
         m_renderingInitPassed = false;
 
         State::monitorState()->remove(m_self.lock());
+        if (g_pSessionLockManager)
+            g_pSessionLockManager->maybeAcknowledgePrivateLock();
     });
 
     m_listeners.state = m_output->events.state.listen([this](const Aquamarine::IOutput::SStateEvent& event) {
@@ -388,6 +405,8 @@ void CMonitor::onDisconnect(bool destroy) {
     }};
 
     m_frameScheduler.reset();
+    if (m_dpmsRetryTimer)
+        g_pEventLoopManager->removeTimer(std::exchange(m_dpmsRetryTimer, nullptr));
     m_commitCoordinator->cancelPending();
     clearModeRetry();
 
@@ -1110,7 +1129,7 @@ void CMonitor::scheduleFrame(Aquamarine::IOutput::scheduleFrameReason reason) {
     if ((g_pCompositor->m_aqBackend->hasSession() && !g_pCompositor->m_aqBackend->session->active) || !g_pCompositor->m_sessionActive)
         return;
 
-    if (!m_enabled)
+    if (!m_enabled || !m_output)
         return;
 
     if (m_renderingActive)
@@ -1869,6 +1888,8 @@ void CMonitor::recheckSolitary() {
 }
 
 uint8_t CMonitor::isTearingBlocked(bool full) {
+    if (g_pSessionLockManager->isSessionLocked() || g_pSessionLockManager->forcesOpaqueLock())
+        return TC_CANDIDATE;
     uint8_t     reasons = 0;
 
     static auto PTEARINGENABLED = CConfigValue<Config::INTEGER>("general:allow_tearing");
@@ -2195,7 +2216,8 @@ void CMonitor::handleDSleave() {
 }
 
 bool CMonitor::canAttemptDirectScanoutFast() const {
-    return !m_solitaryClient.expired() || !m_lastScanout.expired() || m_directScanoutIsActive;
+    return !g_pSessionLockManager->isSessionLocked() && !g_pSessionLockManager->forcesOpaqueLock() &&
+        (!m_solitaryClient.expired() || !m_lastScanout.expired() || m_directScanoutIsActive);
 }
 
 bool CMonitor::isMultiGPU() {
@@ -2236,6 +2258,9 @@ bool CMonitor::isMultiGPU() {
 }
 
 bool CMonitor::shouldUseSoftwareCursors() {
+    if (m_output && m_output->privateScanout)
+        return true;
+
     static auto PNOHW      = CConfigValue<Config::INTEGER>("cursor:no_hardware_cursors");
     static auto PINVISIBLE = CConfigValue<Config::INTEGER>("cursor:invisible");
 
@@ -2255,12 +2280,60 @@ bool CMonitor::shouldUseSoftwareCursors() {
     return true;
 }
 
+void CMonitor::setPrivateScanout(bool enabled) {
+    if (!m_output || m_output->privateScanout == enabled)
+        return;
+
+    m_output->privateScanout = enabled;
+    m_commitCoordinator->cancelPending();
+    if (m_frameScheduler)
+        m_frameScheduler->reset();
+    invalidatePrivatePresentation();
+    if (enabled)
+        m_output->setCursor(nullptr, {});
+    if (!enabled)
+        return;
+    m_solitaryClient.reset();
+    m_tearingState.activelyTearing = false;
+    m_tearingState.nextRenderTorn  = false;
+    if (m_directScanoutIsActive || m_lastScanout)
+        handleDSleave();
+}
+
+void CMonitor::invalidatePrivatePresentation() {
+    ++m_privateEpoch;
+    m_presentedPrivateEpoch = 0;
+    m_damage.damageEntire();
+    if (g_pSessionLockManager && m_output && m_output->privateScanout)
+        g_pSessionLockManager->schedulePrivateOutputRecovery();
+}
+
+bool CMonitor::privateOrOff() const {
+    return !m_output || m_output->nonDesktop || m_output->scanoutDisabled || (m_output->privateScanout && m_presentedPrivateEpoch == m_privateEpoch);
+}
+
+void CMonitor::recoverPrivateScanout() {
+    if (!m_output->canConfirmPrivatePresentation())
+        LOG(Log::WARN, "Output {} requires host presentation feedback for managed locking", m_name);
+
+    m_commitCoordinator->cancelPending();
+    invalidatePrivatePresentation();
+    if (m_output->disableForPrivacy() && m_enabled && m_dpmsStatus) {
+        m_output->state->setEnabled(true);
+        scheduleFrame();
+    }
+}
+
 void CMonitor::setDPMS(bool on) {
     // Don't trigger animation if the target state is the same
     if (m_dpmsStatus == on)
         return;
 
+    if (m_dpmsRetryTimer)
+        g_pEventLoopManager->removeTimer(std::exchange(m_dpmsRetryTimer, nullptr));
     m_dpmsStatus = on;
+    if (m_output && m_output->privateScanout && on)
+        invalidatePrivatePresentation();
     m_events.dpmsChanged.emit();
 
     if (on) {
@@ -2289,6 +2362,9 @@ void CMonitor::setDPMS(bool on) {
 }
 
 void CMonitor::commitDPMSState(bool state) {
+    if (!m_output || !m_enabled)
+        return;
+
     m_output->state->resetExplicitFences();
     m_output->state->setEnabled(state);
     if (!state)
@@ -2301,22 +2377,17 @@ void CMonitor::commitDPMSState(bool state) {
         // because disable + enable were sent almost instantly
 
         m_dpmsRetryTimer = makeShared<CEventLoopTimer>(
-            std::chrono::milliseconds(2000 / sc<int>(m_refreshRate)),
-            [this, self = m_self](SP<CEventLoopTimer> s, void* d) {
-                if (!self)
+            std::chrono::milliseconds(sc<int>(2000.F / std::max(m_refreshRate, 1.F))),
+            [self = m_self, state](SP<CEventLoopTimer>, void*) {
+                const auto monitor = self.lock();
+                if (!monitor || !monitor->m_output || !monitor->m_enabled || monitor->m_dpmsStatus != state)
                     return;
 
-                m_output->state->resetExplicitFences();
-                m_output->state->setEnabled(m_dpmsStatus);
-                if (!m_dpmsStatus)
-                    m_usedAsyncBuffers.clear();
-
-                if (!m_state.commit()) {
-                    LOG(Log::ERR, "Couldn't retry committing output {} for DPMS = {}", m_name, m_dpmsStatus);
-                    return;
-                }
-
-                m_dpmsRetryTimer.reset();
+                monitor->m_dpmsRetryTimer.reset();
+                monitor->m_output->state->resetExplicitFences();
+                monitor->m_output->state->setEnabled(state);
+                if (!monitor->m_state.commit())
+                    LOG(Log::ERR, "Couldn't retry committing output {} for DPMS = {}", monitor->m_name, state);
             },
             nullptr);
         g_pEventLoopManager->addTimer(m_dpmsRetryTimer);
@@ -2608,6 +2679,16 @@ void CMonitorState::ensureBufferPresent() {
 }
 
 bool CMonitorState::commit() {
+    const auto& output = m_owner->m_output;
+    if (!output)
+        return false;
+
+    if (output->privateScanout && output->state->state().enabled) {
+        m_owner->invalidatePrivatePresentation();
+        m_owner->scheduleFrame();
+        return true;
+    }
+
     if (m_owner->m_commitCoordinator->deferStateCommit())
         return true;
 
@@ -2620,6 +2701,29 @@ bool CMonitorState::commit() {
 
     bool ret = m_owner->m_output->commit();
     return ret;
+}
+
+bool CMonitorState::commitPrivateFrame(uint64_t serial, const SP<Aquamarine::IBuffer>& buffer) {
+    const auto& output = m_owner->m_output;
+    if (!output || !output->privateScanout || serial != m_owner->m_privateEpoch || !updateSwapchain())
+        return false;
+
+    Event::bus()->m_events.monitor.preCommit.emit(m_owner->m_self.lock());
+    if (serial != m_owner->m_privateEpoch || output->state->state().buffer != buffer)
+        return false;
+
+    if (m_owner->m_dpmsStatus && !output->state->state().enabled)
+        output->state->setEnabled(true);
+    if (!output->state->state().enabled)
+        return false;
+
+    output->privateFrame       = output->state->state().buffer;
+    output->privateFrameSerial = serial;
+    CScopeGuard clearAuthorization([&output] {
+        output->privateFrame.reset();
+        output->privateFrameSerial = 0;
+    });
+    return output->commit();
 }
 
 bool CMonitorState::test() {

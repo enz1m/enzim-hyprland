@@ -257,11 +257,18 @@ void CSeatManager::updateActiveKeyboardData() {
     PROTO::inputCapture->updateKeymap();
 }
 
+static bool allowsSeatInput(const SP<CWLSurfaceResource>& surface) {
+    return !g_pSessionLockManager || g_pSessionLockManager->allowsInput(surface);
+}
+
 void CSeatManager::setKeyboardFocus(SP<CWLSurfaceResource> surf) {
+    if (surf && !allowsSeatInput(surf))
+        return;
+
     if (m_state.keyboardFocus == surf)
         return;
 
-    if (!g_pInputManager->anyHidHasCap(HID_INPUT_CAPABILITY_KEYBOARD)) {
+    if (surf && (!m_keyboard || !g_pInputManager->anyHidHasCap(HID_INPUT_CAPABILITY_KEYBOARD))) {
         LOG(Log::ERR, "BUG THIS: setKeyboardFocus without a valid keyboard capability");
         return;
     }
@@ -275,7 +282,8 @@ void CSeatManager::setKeyboardFocus(SP<CWLSurfaceResource> surf) {
         if (!k)
             continue;
 
-        k->sendMods(0, m_keyboard->m_modifiersState.latched, m_keyboard->m_modifiersState.locked, m_keyboard->m_modifiersState.group);
+        if (m_keyboard)
+            k->sendMods(0, m_keyboard->m_modifiersState.latched, m_keyboard->m_modifiersState.locked, m_keyboard->m_modifiersState.group);
         k->sendLeave();
     }
 
@@ -336,7 +344,7 @@ void CSeatManager::sendKeyboardKey(uint32_t timeMs, uint32_t key, wl_keyboard_ke
 }
 
 void CSeatManager::sendKeyboardKey(uint32_t timeMs, uint32_t key, wl_keyboard_key_state state_, bool userPress) {
-    if (!m_state.keyboardFocusResource)
+    if (!m_state.keyboardFocusResource || !allowsSeatInput(m_state.keyboardFocus.lock()))
         return;
 
     for (auto const& s : m_seatResources) {
@@ -353,7 +361,7 @@ void CSeatManager::sendKeyboardKey(uint32_t timeMs, uint32_t key, wl_keyboard_ke
 }
 
 void CSeatManager::sendKeyboardMods(uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group) {
-    if (!m_state.keyboardFocusResource)
+    if (!m_state.keyboardFocusResource || !allowsSeatInput(m_state.keyboardFocus.lock()))
         return;
 
     for (auto const& s : m_seatResources) {
@@ -370,6 +378,9 @@ void CSeatManager::sendKeyboardMods(uint32_t depressed, uint32_t latched, uint32
 }
 
 void CSeatManager::setPointerFocus(SP<CWLSurfaceResource> surf, const Vector2D& local) {
+    if (surf && !allowsSeatInput(surf))
+        return;
+
     const bool dndActive = PROTO::data && PROTO::data->dndActive();
 
     if (m_state.pointerFocus == surf)
@@ -384,7 +395,10 @@ void CSeatManager::setPointerFocus(SP<CWLSurfaceResource> surf, const Vector2D& 
         return;
     }
 
-    if (!g_pInputManager->anyHidHasCap(HID_INPUT_CAPABILITY_POINTER)) {
+    if (g_pSessionLockManager && g_pSessionLockManager->forcesOpaqueLock())
+        g_pInputManager->resetClientCursor();
+
+    if (surf && !g_pInputManager->anyHidHasCap(HID_INPUT_CAPABILITY_POINTER)) {
         LOG(Log::ERR, "BUG THIS: setPointerFocus without a valid pointer input");
         return;
     }
@@ -438,7 +452,7 @@ void CSeatManager::setPointerFocus(SP<CWLSurfaceResource> surf, const Vector2D& 
 }
 
 void CSeatManager::sendPointerMotion(uint32_t timeMs, const Vector2D& local) {
-    if (!m_state.pointerFocusResource)
+    if (!m_state.pointerFocusResource || !allowsSeatInput(m_state.pointerFocus.lock()))
         return;
 
     for (auto const& s : m_seatResources) {
@@ -461,7 +475,7 @@ void CSeatManager::sendPointerButton(uint32_t timeMs, uint32_t key, wl_pointer_b
 }
 
 void CSeatManager::sendPointerButton(uint32_t timeMs, uint32_t key, wl_pointer_button_state state_, bool userPress) {
-    if (!m_state.pointerFocusResource || (PROTO::data && PROTO::data->dndActive()))
+    if (!m_state.pointerFocusResource || !allowsSeatInput(m_state.pointerFocus.lock()) || (PROTO::data && PROTO::data->dndActive()))
         return;
 
     for (auto const& s : m_seatResources) {
@@ -478,7 +492,7 @@ void CSeatManager::sendPointerButton(uint32_t timeMs, uint32_t key, wl_pointer_b
 }
 
 void CSeatManager::sendPointerFrame() {
-    if (!m_state.pointerFocusResource)
+    if (!m_state.pointerFocusResource || !allowsSeatInput(m_state.pointerFocus.lock()))
         return;
 
     sendPointerFrame(m_state.pointerFocusResource);
@@ -503,7 +517,7 @@ void CSeatManager::sendPointerFrame(WP<CWLSeatResource> pResource) {
 
 void CSeatManager::sendPointerAxis(uint32_t timeMs, wl_pointer_axis axis, double value, int32_t discrete, int32_t value120, wl_pointer_axis_source source,
                                    wl_pointer_axis_relative_direction relative) {
-    if (!m_state.pointerFocusResource)
+    if (!m_state.pointerFocusResource || !allowsSeatInput(m_state.pointerFocus.lock()))
         return;
 
     for (auto const& s : m_seatResources) {
@@ -534,6 +548,9 @@ void CSeatManager::sendTouchDown(SP<CWLSurfaceResource> surf, uint32_t timeMs, i
 }
 
 void CSeatManager::sendTouchDown(SP<CWLSurfaceResource> surf, uint32_t timeMs, int32_t id, const Vector2D& local, bool userPress) {
+    if (!surf || !allowsSeatInput(surf))
+        return;
+
     m_listeners.touchSurfaceDestroy.reset();
 
     m_state.touchFocusResource.reset();
@@ -562,7 +579,7 @@ void CSeatManager::sendTouchDown(SP<CWLSurfaceResource> surf, uint32_t timeMs, i
 }
 
 void CSeatManager::sendTouchUp(uint32_t timeMs, int32_t id) {
-    if (!m_state.touchFocusResource || m_touchLocks <= 0)
+    if (!m_state.touchFocusResource || !allowsSeatInput(m_state.touchFocus.lock()) || m_touchLocks <= 0)
         return;
 
     auto client = m_state.touchFocusResource->client();
@@ -586,7 +603,7 @@ void CSeatManager::sendTouchUp(uint32_t timeMs, int32_t id) {
 }
 
 void CSeatManager::sendTouchMotion(uint32_t timeMs, int32_t id, const Vector2D& local) {
-    if (!m_state.touchFocusResource)
+    if (!m_state.touchFocusResource || !allowsSeatInput(m_state.touchFocus.lock()))
         return;
 
     for (auto const& s : m_seatResources) {
@@ -603,7 +620,7 @@ void CSeatManager::sendTouchMotion(uint32_t timeMs, int32_t id, const Vector2D& 
 }
 
 void CSeatManager::sendTouchFrame() {
-    if (!m_state.touchFocusResource)
+    if (!m_state.touchFocusResource || !allowsSeatInput(m_state.touchFocus.lock()))
         return;
 
     for (auto const& s : m_seatResources) {
@@ -648,7 +665,7 @@ void CSeatManager::sendTouchCancel() {
 }
 
 void CSeatManager::sendTouchShape(int32_t id, const Vector2D& shape) {
-    if (!m_state.touchFocusResource)
+    if (!m_state.touchFocusResource || !allowsSeatInput(m_state.touchFocus.lock()))
         return;
 
     for (auto const& s : m_seatResources) {
@@ -665,7 +682,7 @@ void CSeatManager::sendTouchShape(int32_t id, const Vector2D& shape) {
 }
 
 void CSeatManager::sendTouchOrientation(int32_t id, double angle) {
-    if (!m_state.touchFocusResource)
+    if (!m_state.touchFocusResource || !allowsSeatInput(m_state.touchFocus.lock()))
         return;
 
     for (auto const& s : m_seatResources) {
@@ -716,7 +733,7 @@ void CSeatManager::refocusGrab() {
 }
 
 void CSeatManager::onSetCursor(SP<CWLSeatResource> seatResource, uint32_t serial, SP<CWLSurfaceResource> surf, const Vector2D& hotspot) {
-    if (!m_state.pointerFocusResource || !seatResource || seatResource->client() != m_state.pointerFocusResource->client()) {
+    if (!m_state.pointerFocusResource || !allowsSeatInput(m_state.pointerFocus.lock()) || !seatResource || seatResource->client() != m_state.pointerFocusResource->client()) {
         LOG(Log::DEBUG, "[seatmgr] Rejecting a setCursor because the client ain't in focus");
         return;
     }
@@ -822,7 +839,19 @@ void CSeatManager::setCurrentPrimarySelection(SP<IDataSource> source) {
     m_events.setPrimarySelection.emit();
 }
 
+void CSeatManager::clearGrabWithoutRefocus() {
+    auto oldGrab = std::exchange(m_seatGrab, nullptr);
+    if (oldGrab && oldGrab->m_onEnd)
+        oldGrab->m_onEnd();
+}
+
 void CSeatManager::setGrab(SP<CSeatGrab> grab) {
+    if (g_pSessionLockManager && g_pSessionLockManager->forcesOpaqueLock()) {
+        if (!grab)
+            clearGrabWithoutRefocus();
+        return;
+    }
+
     if (m_seatGrab) {
         auto oldGrab = m_seatGrab;
 

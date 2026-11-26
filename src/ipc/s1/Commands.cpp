@@ -1934,6 +1934,28 @@ static std::string getIsLocked(eHyprCtlOutputFormat format, std::string request)
     return lockedStr;
 }
 
+static std::string sleepCover(eHyprCtlOutputFormat, std::string request) {
+    if (!g_pSessionLockManager->managedLock())
+        return "unavailable";
+    if (request == "enzuisleepcover health")
+        return g_pSessionLockManager->logindHealthy() ? "healthy" : "unavailable";
+    if (request == "enzuisleepcover recovery")
+        return g_pSessionLockManager->needsLocker() ? "needed" : "idle";
+    if (request == "enzuisleepcover arm")
+        g_pSessionLockManager->armSleepCover();
+    else if (request == "enzuisleepcover sleep-ready") {
+        if (g_pSessionLockManager->sleepCoverReady())
+            g_pSessionLockManager->reserveSleepCover();
+    } else if (request != "enzuisleepcover status")
+        return "invalid request";
+
+    if (!g_pSessionLockManager->sleepCoverGeneration())
+        return "inactive";
+    if (g_pSessionLockManager->sleepCoverReady())
+        return "ready";
+    return g_pSessionLockManager->privateOutputFailed() ? "failed" : "pending";
+}
+
 static std::string getDescriptions(eHyprCtlOutputFormat format, std::string request) {
     return Config::Values::getAsJson();
 }
@@ -2004,6 +2026,7 @@ void IPC::Socket1::registerBuiltinCommands(CSocket1& socket) {
     });
     socket.registerCommand(legacyCommand("configerrors", COMMAND_MATCH_EXACT, configErrorsRequest));
     socket.registerCommand(legacyCommand("locked", COMMAND_MATCH_EXACT, getIsLocked));
+    socket.registerCommand(privileged(legacyCommand("enzuisleepcover", COMMAND_MATCH_PREFIX, sleepCover)));
     socket.registerCommand(legacyCommand("descriptions", COMMAND_MATCH_EXACT, getDescriptions));
     socket.registerCommand(legacyCommand("submap", COMMAND_MATCH_EXACT, submapRequest));
     socket.registerCommand(legacyCommand("status", COMMAND_MATCH_EXACT, statusRequest));

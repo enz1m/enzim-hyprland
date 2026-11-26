@@ -418,12 +418,13 @@ bool CScreenshareFrame::copyDmabuf() {
 
         self->m_copyInFlight = false;
 
-        if (self->m_copied)
+        if (self->done())
             return;
 
         LOG(Log::TRACE, "Copied frame via dma");
-        self->m_callback(RESULT_COPIED);
         self->m_copied = true;
+        const auto callback = self->m_callback;
+        callback(RESULT_COPIED);
     });
 
     return true;

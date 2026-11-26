@@ -165,6 +165,7 @@ class CSeatManager {
     WP<IKeyboard> m_keyboard;
 
     void          setGrab(SP<CSeatGrab> grab); // nullptr removes
+    void          clearGrabWithoutRefocus();
     SP<CSeatGrab> m_seatGrab;
 
   private:

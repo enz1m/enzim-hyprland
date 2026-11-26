@@ -146,8 +146,9 @@ namespace Render {
 
         virtual SP<IRenderbuffer>    getOrCreateRenderbuffer(SP<Aquamarine::IBuffer> buffer,
                                                              uint32_t                fmt); // TODO? move to protected and fix CPointerManager::renderHWCursorBuffer
-        bool                         commitPendingAndDoExplicitSync(PHLMONITOR pMonitor, std::optional<Monitor::CDamageRing::CTransaction> damage = std::nullopt,
-                                                                    const CRegion& renderedDamage = {}); // TODO? move to protected and fix CMonitorFrameScheduler::onPresented
+        bool commitPendingAndDoExplicitSync(PHLMONITOR pMonitor, std::optional<Monitor::CDamageRing::CTransaction> damage = std::nullopt, const CRegion& renderedDamage = {},
+                                            uint64_t                coverGeneration = 0,
+                                            SP<Aquamarine::IBuffer> privateBuffer   = {});                  // TODO? move to protected and fix CMonitorFrameScheduler::onPresented
         SRenderData                  m_renderData;                                                       // TODO? move to protected and fix CRenderPass
         SP<ITexture>                 m_screencopyDeniedTexture;                                          // TODO? make readonly
         uint                         m_failedAssetsNo     = 0;                                           // TODO? make readonly
@@ -259,6 +260,10 @@ namespace Render {
         SP<ITexture>                       m_lockDead2Texture;
         SP<ITexture>                       m_lockDead3Texture;
         SP<ITexture>                       m_lockTtyTextTexture;
+        SP<ITexture>                       m_lockRecoveryTexture;
+        // The cover stays plain while a locker is expected to attach; the recovery text appears only after a grace period.
+        std::optional<std::chrono::steady_clock::time_point> m_lockRecoverySince;
+        SP<CEventLoopTimer>                m_lockRecoveryTimer;
         CRenderPass*                       m_currentPass = nullptr;
 
         void                               handleFullscreenSettings(PHLMONITOR pMonitor);
@@ -272,6 +277,8 @@ namespace Render {
         void renderAllClientsForWorkspace(PHLMONITOR pMonitor, PHLWORKSPACE pWorkspace, const Time::steady_tp& now, const Vector2D& translate = {0, 0}, const float& scale = 1.f);
         void renderWindow(PHLWINDOW, PHLMONITOR, const Time::steady_tp&, bool, eRenderPassMode, bool ignorePosition = false, bool standalone = false);
         void renderLayer(PHLLS, PHLMONITOR, const Time::steady_tp&, bool popups = false, bool lockscreen = false);
+        void renderLockRecovery(PHLMONITOR);
+        void renderLockRecoveryAfterGrace(PHLMONITOR);
         void renderSessionLockSurface(WP<SSessionLockSurface>, PHLMONITOR, const Time::steady_tp&);
         void renderDragIcon(PHLMONITOR, const Time::steady_tp&);
         void renderIMEPopup(CInputPopup*, PHLMONITOR, const Time::steady_tp&);

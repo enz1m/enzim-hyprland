@@ -17,6 +17,7 @@ namespace Monitor {
         CMonitorFrameScheduler& operator=(const CMonitorFrameScheduler&) = delete;
         CMonitorFrameScheduler& operator=(CMonitorFrameScheduler&&)      = delete;
 
+        void                    reset();
         void                    onSyncFired();
         void                    onPresented();
         void                    onFrame();
@@ -27,6 +28,7 @@ namespace Monitor {
         bool                       newSchedulingEnabled();
 
         bool                       m_renderAtFrame = true;
+        uint64_t                   m_generation    = 0;
         bool                       m_pendingThird  = false;
         hrc::time_point            m_lastRenderBegun;
 

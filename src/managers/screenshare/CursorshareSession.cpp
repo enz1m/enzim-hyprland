@@ -14,6 +14,9 @@ using namespace Screenshare;
 CCursorshareSession::CCursorshareSession(wl_client* client, WP<CWLPointerResource> pointer) : m_client(client), m_pointer(pointer) {
     m_listeners.pointerDestroyed = m_pointer->m_events.destroyed.listen([this] { stop(); });
     m_listeners.cursorChanged    = Pointer::mgr()->m_events.cursorChanged.listen([this] {
+        if (m_stopped)
+            return;
+
         calculateConstraints();
         m_events.constraintsChanged.emit();
 
@@ -39,7 +42,8 @@ CCursorshareSession::~CCursorshareSession() {
 void CCursorshareSession::stop() {
     if (m_stopped)
         return;
-    m_stopped = true;
+    m_stopped      = true;
+    m_pendingFrame = {};
     m_events.stopped.emit();
 }
 
@@ -65,7 +69,7 @@ void CCursorshareSession::calculateConstraints() {
 
 // TODO: allow render to buffer without monitor and remove monitor param
 eScreenshareError CCursorshareSession::share(PHLMONITOR monitor, SP<IHLBuffer> buffer, FSourceBoxCallback sourceBoxCallback, FScreenshareCallback callback) {
-    if (m_stopped || m_pointer.expired() || m_bufferSize == Vector2D(0, 0))
+    if (m_stopped || g_pSessionLockManager->forcesOpaqueLock() || g_pSessionLockManager->isSessionLocked() || m_pointer.expired() || m_bufferSize == Vector2D(0, 0))
         return ERROR_STOPPED;
 
     if UNLIKELY (!buffer || !buffer->m_resource || !buffer->m_resource->good()) {
@@ -142,7 +146,7 @@ void CCursorshareSession::render() {
 }
 
 bool CCursorshareSession::copy() {
-    if (!m_pendingFrame.callback || !m_pendingFrame.monitor || !m_pendingFrame.callback || !m_pendingFrame.sourceBoxCallback)
+    if (m_stopped || !m_pendingFrame.callback || !m_pendingFrame.monitor || !m_pendingFrame.sourceBoxCallback)
         return false;
 
     // FIXME: this doesn't really make sense but just to be safe
@@ -162,8 +166,8 @@ bool CCursorshareSession::copy() {
 
         render();
 
-        g_pHyprRenderer->endRender([callback = m_pendingFrame.callback]() {
-            if (callback)
+        g_pHyprRenderer->endRender([session = m_self, callback = m_pendingFrame.callback] {
+            if (session && !session->m_stopped)
                 callback(RESULT_COPIED);
         });
     } else if (auto attrs = m_pendingFrame.buffer->shm(); attrs.success) {

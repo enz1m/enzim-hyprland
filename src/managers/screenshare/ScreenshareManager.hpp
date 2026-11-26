@@ -225,6 +225,7 @@ namespace Screenshare {
 
         UP<CCursorshareSession> newCursorSession(wl_client* client, WP<CWLPointerResource> pointer);
 
+        void                    suspendCapture();
         void                    onOutputCommit(PHLMONITOR monitor, const CRegion& damage);
         bool                    isOutputBeingSSd(PHLMONITOR monitor);
         bool                    outputNeedsCopyFB(PHLMONITOR monitor);

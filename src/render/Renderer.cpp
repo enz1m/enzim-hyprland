@@ -1079,7 +1079,7 @@ void IHyprRenderer::renderSessionLockSurface(WP<SSessionLockSurface> pSurface, P
 
     CSurfacePassElement::SRenderData renderdata = {pMonitor, time, pMonitor->m_position, pMonitor->m_position};
 
-    renderdata.blur     = *PSESSIONLOCKBLUR && *PSESSIONLOCKXRAY;
+    renderdata.blur     = *PSESSIONLOCKBLUR && *PSESSIONLOCKXRAY && !g_pSessionLockManager->forcesOpaqueLock();
     renderdata.surface  = pSurface->surface->surface();
     renderdata.decorate = false;
     renderdata.w        = pMonitor->m_size.x;
@@ -1718,6 +1718,57 @@ void IHyprRenderer::renderSessionLockPrimer(PHLMONITOR pMonitor) {
     m_renderPass.add(makeUnique<CRectPassElement>(data));
 }
 
+void IHyprRenderer::renderLockRecoveryAfterGrace(PHLMONITOR pMonitor) {
+    // A locker normally attaches within a moment of resume; only a locker that stays missing gets the recovery text.
+    // The grace starts after resume: the locker is only started once sleep preparation ends, and a cover
+    // frame drawn just before suspend must not use up the grace.
+    constexpr auto GRACE    = std::chrono::seconds(5);
+    const auto     NOW      = std::chrono::steady_clock::now();
+    const bool     SLEEPING = g_pSessionLockManager->blocksUnlock();
+    if (SLEEPING)
+        m_lockRecoverySince.reset();
+    else if (!m_lockRecoverySince)
+        m_lockRecoverySince = NOW;
+
+    if (m_lockRecoverySince && NOW - *m_lockRecoverySince >= GRACE) {
+        renderLockRecovery(pMonitor);
+        return;
+    }
+
+    if (m_lockRecoveryTimer)
+        return;
+    m_lockRecoveryTimer = makeShared<CEventLoopTimer>(
+        std::chrono::duration_cast<std::chrono::microseconds>(m_lockRecoverySince ? *m_lockRecoverySince + GRACE - NOW : GRACE),
+        [this](auto, auto) {
+            m_lockRecoveryTimer.reset();
+            for (const auto& monitor : State::monitorState()->allMonitors()) {
+                monitor->m_damage.damageEntire();
+                monitor->scheduleFrame();
+            }
+        },
+        nullptr);
+    g_pEventLoopManager->addTimer(m_lockRecoveryTimer);
+}
+
+void IHyprRenderer::renderLockRecovery(PHLMONITOR pMonitor) {
+    if (!m_lockRecoveryTexture) {
+        const auto MESSAGE    = g_pCompositor->getVTNr().has_value() ?
+            "Session locked\n\nThe sign-in screen is unavailable.\nSwitch to a text console (Ctrl+Alt+F3) to sign in and restart the session." :
+            "Session locked\n\nThe sign-in screen is unavailable. Sign in again to recover the session.";
+        m_lockRecoveryTexture = renderText(MESSAGE, CHyprColor{0.9F, 0.9F, 0.9F, 1.F}, 20, false);
+    }
+    if (!m_lockRecoveryTexture || m_lockRecoveryTexture->m_size.x <= 0)
+        return;
+
+    const auto                   SIZE      = pMonitor->m_transformedSize;
+    const auto                   SCALE     = std::min<double>(pMonitor->m_scale, 0.9 * SIZE.x / m_lockRecoveryTexture->m_size.x);
+    const auto                   TEXT_SIZE = m_lockRecoveryTexture->m_size * SCALE;
+    CTexPassElement::SRenderData data;
+    data.tex = m_lockRecoveryTexture;
+    data.box = CBox{(SIZE - TEXT_SIZE) / 2, TEXT_SIZE};
+    m_renderPass.add(makeUnique<CTexPassElement>(std::move(data)));
+}
+
 void IHyprRenderer::renderSessionLockMissing(PHLMONITOR pMonitor) {
     if (g_pCompositor->m_startLocked && !g_pCompositor->m_startLockedCommand.empty())
         return;
@@ -2087,7 +2138,7 @@ static void setWallpaperCoverage(PHLMONITOR monitor, bool covered) {
 }
 
 void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
-    if (!pMonitor)
+    if (!pMonitor || !pMonitor->m_output || !pMonitor->m_enabled)
         return;
     static std::chrono::high_resolution_clock::time_point renderStart        = std::chrono::high_resolution_clock::now();
     static std::chrono::high_resolution_clock::time_point renderStartOverlay = std::chrono::high_resolution_clock::now();
@@ -2147,6 +2198,17 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
         pMonitor->m_pendingFrame = true;
         return;
     }
+
+    const bool PRIVATE_LOCK  = pMonitor->m_output->privateScanout;
+    const auto PRIVATE_EPOCH = pMonitor->m_privateEpoch;
+    if (PRIVATE_LOCK && pMonitor->m_output->scanoutDisabled && (!pMonitor->m_dpmsStatus || g_pSessionLockManager->preparingForSleep()))
+        return;
+
+    if (g_pSessionLockManager->isSessionLocked() && (pMonitor->m_lastScanout || pMonitor->m_directScanoutIsActive))
+        pMonitor->handleDSleave();
+
+    if (PRIVATE_LOCK && !pMonitor->m_state.updateSwapchain())
+        return;
 
     // tearing and DS first
     bool       shouldTear              = pMonitor->updateTearing();
@@ -2221,7 +2283,7 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
 
     // if we have no tracking or full tracking, invalidate the entire monitor
     if (*PDAMAGETRACKINGMODE == DAMAGE_TRACKING_NONE || *PDAMAGETRACKINGMODE == DAMAGE_TRACKING_MONITOR || pMonitor->m_forceFullFrames > 0 || damageBlinkCleanup > 0 ||
-        ZOOM_DAMAGE_ENTIRE)
+        ZOOM_DAMAGE_ENTIRE || PRIVATE_LOCK)
         damage = {0, 0, sc<int>(pMonitor->m_transformedSize.x) * 10, sc<int>(pMonitor->m_transformedSize.y) * 10};
 
     finalDamage = damage;
@@ -2237,11 +2299,21 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
 
     Event::bus()->m_events.render.stage.emit(RENDER_BEGIN);
 
+    const auto COVER_GENERATION = PRIVATE_LOCK ? PRIVATE_EPOCH : 0;
+    const auto LOCK_SURFACE     = g_pSessionLockManager->getSessionLockSurfaceForMonitor(pMonitor->m_id);
     bool renderCursor = true;
 
-    if (pMonitor->m_solitaryClient && !g_pSessionLockManager->isSessionLocked() && (!finalDamage.empty() || *PSOLDAMAGE))
+    if (!PRIVATE_LOCK && pMonitor->m_solitaryClient && !g_pSessionLockManager->isSessionLocked() && (!finalDamage.empty() || *PSOLDAMAGE))
         renderWindow(pMonitor->m_solitaryClient.lock(), pMonitor, NOW, false, RENDER_PASS_MAIN /* solitary = no popups */);
-    else if (!finalDamage.empty()) {
+    else if (!finalDamage.empty() && PRIVATE_LOCK) {
+        renderSessionLockPrimer(pMonitor);
+        m_renderData.blockScreenShader = true;
+        if (LOCK_SURFACE) {
+            m_lockRecoverySince.reset();
+            renderSessionLockSurface(LOCK_SURFACE, pMonitor, NOW);
+        } else if (!pMonitor->isMirror() && (g_pSessionLockManager->sleepCoverGeneration() || g_pSessionLockManager->shallConsiderLockMissing()))
+            renderLockRecoveryAfterGrace(pMonitor);
+    } else if (!finalDamage.empty()) {
         if (pMonitor->isMirror()) {
             blend(false);
             renderMirrored();
@@ -2305,9 +2377,10 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
     Event::bus()->m_events.render.stage.emit(RENDER_LAST_MOMENT);
 
     if (!finalDamage.empty())
-        setWallpaperCoverage(pMonitor, !pMonitor->isMirror() && !g_pSessionLockManager->isSessionLocked() && m_renderPass.coversWallpaper(pMonitor));
+        setWallpaperCoverage(pMonitor, !PRIVATE_LOCK && !pMonitor->isMirror() && !g_pSessionLockManager->isSessionLocked() && m_renderPass.coversWallpaper(pMonitor));
 
     endRender();
+    const auto privateBuffer = PRIVATE_LOCK ? pMonitor->m_output->state->state().buffer : nullptr;
 
     TRACY_GPU_COLLECT;
 
@@ -2327,11 +2400,11 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
     pMonitor->m_output->state->addDamage(frameDamage);
     bool submitted = true;
     if (commit)
-        submitted = commitPendingAndDoExplicitSync(pMonitor, std::move(damageTransaction), m_renderData.damage);
+        submitted = commitPendingAndDoExplicitSync(pMonitor, std::move(damageTransaction), m_renderData.damage, finalDamage.empty() ? 0 : COVER_GENERATION, privateBuffer);
     else {
         if (damageTransaction)
             damageTransaction->commit();
-        pMonitor->m_commitCoordinator->stageRenderedDamage(m_renderData.damage, pMonitor->needsACopyFB());
+        pMonitor->m_commitCoordinator->stageRenderedDamage(m_renderData.damage, pMonitor->needsACopyFB(), finalDamage.empty() ? 0 : COVER_GENERATION);
     }
 
     if (shouldTear && submitted)
@@ -2558,10 +2631,19 @@ void IHyprRenderer::handleFullscreenSettings(PHLMONITOR pMonitor) {
     pMonitor->m_previousFSWindow = FULLSCREEN_WINDOW;
 }
 
-bool IHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor, std::optional<Monitor::CDamageRing::CTransaction> damage, const CRegion& renderedDamage) {
-    handleFullscreenSettings(pMonitor);
+bool IHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor, std::optional<Monitor::CDamageRing::CTransaction> damage, const CRegion& renderedDamage,
+                                                   uint64_t coverGeneration, SP<Aquamarine::IBuffer> privateBuffer) {
+    if (!g_pSessionLockManager->isSessionLocked() && !g_pSessionLockManager->forcesOpaqueLock())
+        handleFullscreenSettings(pMonitor);
 
     const auto                                staged = renderedDamage.empty() ? pMonitor->m_commitCoordinator->takeStagedRender() : std::nullopt;
+
+    coverGeneration = staged ? staged->coverGeneration : coverGeneration;
+    const auto active = pMonitor->m_output->privateScanout ? pMonitor->m_privateEpoch : 0;
+    if (coverGeneration != active) {
+        pMonitor->addDamage(CBox{{}, pMonitor->m_transformedSize});
+        return false;
+    }
 
     Monitor::COutputCommitCoordinator::SFrame frame{
         .kind              = Monitor::COutputCommitCoordinator::FRAME_COMPOSED,
@@ -2572,6 +2654,8 @@ bool IHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor, std::opt
         .vrr               = pMonitor->m_vrrActive,
         .copyFBPrepared    = staged ? staged->copyFBPrepared : pMonitor->needsACopyFB(),
         .renderedLocked    = staged ? staged->renderedLocked : g_pSessionLockManager->isSessionLocked(),
+        .coverGeneration   = coverGeneration,
+        .privateBuffer     = std::move(privateBuffer),
     };
 
     const auto result = pMonitor->m_commitCoordinator->submit(std::move(frame));

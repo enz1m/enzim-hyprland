@@ -49,6 +49,7 @@ namespace Monitor {
         ~CMonitorState() = default;
 
         bool commit();
+        bool commitPrivateFrame(uint64_t serial, const SP<Aquamarine::IBuffer>& buffer);
         bool test();
         bool updateSwapchain();
         void applyModeWithSwapchain(const SP<Aquamarine::SOutputMode>& mode);
@@ -73,7 +74,7 @@ namespace Monitor {
         Vector2D                    m_transformedSize  = Vector2D(0, 0);
 
         MONITORID                   m_id                     = MONITOR_INVALID;
-        bool                        m_opaqueBorderlessCover = false;
+        bool                        m_opaqueBorderlessCover  = false;
         PHLWORKSPACE                m_activeWorkspace        = nullptr;
         PHLWORKSPACE                m_activeSpecialWorkspace = nullptr;
         float                       m_setScale               = 1; // scale set by cfg
@@ -104,6 +105,13 @@ namespace Monitor {
         uint32_t                    m_prevDrmFormat = DRM_FORMAT_INVALID;
 
         CMonitorZoomController      m_zoomController;
+
+        uint64_t                    m_privateEpoch          = 1;
+        uint64_t                    m_presentedPrivateEpoch = 0;
+        void                        setPrivateScanout(bool enabled);
+        void                        invalidatePrivatePresentation();
+        bool                        privateOrOff() const;
+        void                        recoverPrivateScanout();
 
         bool                        m_dpmsStatus       = true;
         bool                        m_vrrActive        = false; // this can be TRUE even if VRR is not active in the case that this display does not support it.
@@ -414,6 +422,8 @@ namespace Monitor {
             CHyprSignalListener state;
             CHyprSignalListener needsFrame;
             CHyprSignalListener presented;
+            CHyprSignalListener privatePresented;
+            CHyprSignalListener scanoutInvalidated;
             CHyprSignalListener commit;
             CHyprSignalListener commitResult;
         } m_listeners;

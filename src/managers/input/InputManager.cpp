@@ -70,7 +70,7 @@ using namespace Hyprutils::String;
 
 CInputManager::CInputManager() {
     m_listeners.setCursorShape = PROTO::cursorShape->m_events.setShape.listen([this](const CCursorShapeProtocol::SSetShapeEvent& event) {
-        if (!g_pSeatManager->m_state.pointerFocusResource)
+        if (!g_pSeatManager->m_state.pointerFocusResource || !g_pSessionLockManager->allowsInput(g_pSeatManager->m_state.pointerFocus.lock()))
             return;
 
         if (wl_resource_get_client(event.pMgr->resource()) != g_pSeatManager->m_state.pointerFocusResource->client())
@@ -303,6 +303,16 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus, bool mouse, st
     if (CURSOR_MONITOR && !CURSOR_MONITOR->m_solitaryClient.lock() && g_pHyprRenderer->shouldRenderCursor() && Pointer::mgr()->softwareLockedFor(CURSOR_MONITOR_REF) &&
         !SKIP_CURSOR_FRAME_SCHEDULE)
         CURSOR_MONITOR->scheduleFrame(Aquamarine::IOutput::AQ_SCHEDULE_CURSOR_MOVE);
+
+    if (g_pSessionLockManager->forcesOpaqueLock()) {
+        const auto LOCK    = g_pSessionLockManager->getSessionLockSurfaceForMonitor(PMONITOR->m_id);
+        const auto SURFACE = LOCK ? LOCK->surface->surface() : nullptr;
+        const auto LOCAL   = mouseCoords - PMONITOR->m_position;
+        Desktop::focusState()->rawSurfaceFocus(SURFACE);
+        g_pSeatManager->setPointerFocus(SURFACE, LOCAL);
+        g_pSeatManager->sendPointerMotion(time, LOCAL);
+        return;
+    }
 
     // constraints
     auto confineToRegion = [&](const CRegion& rg, SP<Desktop::View::CWLSurface> surf) {
@@ -842,6 +852,14 @@ void CInputManager::processMouseRequest(const CSeatManager::SSetCursorEvent& eve
         return;
 
     g_pHyprRenderer->setCursorSurface(m_cursorSurfaceInfo.wlSurface, event.hotspot.x, event.hotspot.y);
+}
+
+void CInputManager::resetClientCursor() {
+    m_cursorSurfaceInfo.wlSurface->unassign();
+    m_cursorSurfaceInfo.vHotspot = {};
+    m_cursorSurfaceInfo.hidden   = false;
+    m_cursorSurfaceInfo.name     = "left_ptr";
+    g_pHyprRenderer->setCursorFromName(m_cursorSurfaceInfo.name, true);
 }
 
 void CInputManager::restoreCursorIconToApp() {

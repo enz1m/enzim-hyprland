@@ -153,6 +153,8 @@ class CInputManager {
     void               onPinchUpdate(IPointer::SPinchUpdateEvent);
     void               onPinchEnd(IPointer::SPinchEndEvent);
 
+    void               resetClientCursor();
+    void               cancelPrivateInputContacts();
     void               onTabletAxis(CTablet::SAxisEvent);
     void               onTabletProximity(CTablet::SProximityEvent);
     void               onTabletTip(CTablet::STipEvent);

@@ -54,11 +54,12 @@ bool COutputCommitCoordinator::deferStateCommit() {
     return true;
 }
 
-void COutputCommitCoordinator::stageRenderedDamage(const CRegion& damage, bool copyFBPrepared) {
+void COutputCommitCoordinator::stageRenderedDamage(const CRegion& damage, bool copyFBPrepared, uint64_t coverGeneration) {
     m_stagedRender = SStagedRender{
-        .damage         = damage,
-        .copyFBPrepared = copyFBPrepared,
-        .renderedLocked = g_pSessionLockManager->isSessionLocked(),
+        .damage          = damage,
+        .copyFBPrepared  = copyFBPrepared,
+        .coverGeneration = coverGeneration,
+        .renderedLocked  = g_pSessionLockManager->isSessionLocked(),
     };
 }
 
@@ -67,7 +68,7 @@ std::optional<COutputCommitCoordinator::SStagedRender> COutputCommitCoordinator:
 }
 
 bool COutputCommitCoordinator::canSubmitAsync(const SFrame& frame) const {
-    if (!asyncEnabled() || m_pending)
+    if (frame.coverGeneration || !asyncEnabled() || m_pending)
         return false;
 
     const auto CAPS = m_monitor->m_output->commitCapabilities();
@@ -128,10 +129,15 @@ COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submitSynchron
 
     PROTO::presentation->tagQueued(m_monitor->m_self.lock(), 0, frame.tearing, frame.vrr);
 
-    bool ok = frame.kind == FRAME_DIRECT_SCANOUT ? m_monitor->m_output->commit() : m_monitor->m_state.commit();
+    auto commit = [&] {
+        if (frame.coverGeneration)
+            return m_monitor->m_state.commitPrivateFrame(frame.coverGeneration, frame.privateBuffer);
+        return frame.kind == FRAME_DIRECT_SCANOUT ? m_monitor->m_output->commit() : m_monitor->m_state.commit();
+    };
+    bool ok = commit();
     if (!ok && frame.kind == FRAME_COMPOSED && m_monitor->m_inFence.isValid()) {
         m_monitor->m_output->state->resetExplicitFences();
-        ok = m_monitor->m_state.commit();
+        ok = commit();
     }
 
     if (!ok) {

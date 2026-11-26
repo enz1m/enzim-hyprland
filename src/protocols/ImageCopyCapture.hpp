@@ -100,11 +100,18 @@ class CImageCopyCaptureCursorSession {
         CHyprSignalListener commit;
     } m_listeners;
 
-    void sendCursorEvents();
+    WP<CImageCopyCaptureCursorSession> m_self;
+    bool                               m_frameFinished = false;
 
-    void createFrame(SP<CExtImageCopyCaptureFrameV1> resource);
-    void destroyCaptureSession();
-    void sendConstraints();
+    void                               sendCursorEvents();
+    void                               stopCapture();
+    void                               suspend();
+
+    void                               createFrame(SP<CExtImageCopyCaptureFrameV1> resource);
+    void                               destroyCaptureSession();
+    void                               sendConstraints();
+
+    friend class CImageCopyCaptureProtocol;
 };
 
 class CImageCopyCaptureProtocol : public IWaylandProtocol {
@@ -113,6 +120,7 @@ class CImageCopyCaptureProtocol : public IWaylandProtocol {
 
     virtual void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id);
 
+    void         suspendCursorCapture();
     void         destroyResource(CExtImageCopyCaptureManagerV1* resource);
     void         destroyResource(CImageCopyCaptureSession* resource);
     void         destroyResource(CImageCopyCaptureCursorSession* resource);

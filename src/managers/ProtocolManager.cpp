@@ -480,7 +480,7 @@ namespace EnzuiAdmission {
             for (const auto* key :
                  {"ENZUI_PRIVILEGED_CLIENTS", "ENZUI_SHELL_EXE", "ENZUI_SHELL_LAUNCHER_PID", "ENZUI_SHELL_LAUNCHER_START", "ENZUI_SHELL_LAUNCHER_FD", "ENZUI_PORTAL_EXES",
                   "ENZUI_PORTAL_INPUT_EXES", "ENZUI_PORTAL_HELPER_EXES", "ENZUI_DEV_PRIVILEGED_EXES", "ENZUI_CONTROL_EXES", "ENZUI_IME_EXES",
-                  "ENZUI_TEXT_COMMIT_EXES", "LD_LIBRARY_PATH"})
+                  "ENZUI_TEXT_COMMIT_EXES", "ENZUI_LOCK_EXE", "LD_LIBRARY_PATH"})
                 values.emplace(key, getenv(key) ? getenv(key) : "");
             return values;
         }();
@@ -1245,6 +1245,25 @@ IPC::Socket1::SResponse enzuiDispatchControlPeer(int fd, std::string request, pi
         ~SScope() { EnzuiAdmission::controlPeer = previous; }
     } scope{std::exchange(EnzuiAdmission::controlPeer, &owner)};
     return handler(std::move(request), owner.pid == pid ? pid : 0);
+}
+
+bool enzuiAllowsLocker(const wl_client* client) {
+    if (!g_pSessionLockManager || !g_pSessionLockManager->managedLock())
+        return true;
+
+    auto                  owner = EnzuiAdmission::peer(wl_client_get_fd(const_cast<wl_client*>(client)));
+    EnzuiAdmission::SProc proc;
+    if (owner.pid <= 0 || !EnzuiAdmission::readProc(owner.pid, proc) || EnzuiAdmission::injected(owner.pid) ||
+        !EnzuiAdmission::exeIs(owner.pid, EnzuiAdmission::setting("ENZUI_LOCK_EXE")))
+        return false;
+
+    // The registered Shell supplies the locker environment, including its authentication bus.
+    if (!EnzuiAdmission::enforcing())
+        return false;
+
+    EnzuiAdmission::SProc          parent;
+    Hyprutils::OS::CFileDescriptor handle(sc<int>(syscall(SYS_pidfd_open, proc.ppid, 0)));
+    return EnzuiAdmission::readProc(proc.ppid, parent) && EnzuiAdmission::claimShell(proc.ppid, parent.start, handle.get()) && EnzuiAdmission::unchanged(owner, proc);
 }
 
 bool enzuiAllowsTextCommit(const wl_client* client) {
