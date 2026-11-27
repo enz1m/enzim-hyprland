@@ -982,10 +982,14 @@ namespace EnzuiAdmission {
         uint32_t               cursor = 0;
         uint32_t               anchor = 0;
         uint64_t               token  = 0;
+        std::optional<size_t>  primaryAnchor;
     };
 
-    static SWritingSelection writingSelection;
-    static uint64_t          writingToken = 0;
+    static SWritingSelection      writingSelection;
+    static uint64_t               writingToken = 0;
+    static WP<CWLSurfaceResource> writingPrimarySurface;
+    static WP<CTextInputV3>       writingPrimaryInput;
+    static CHyprSignalListener    writingPrimaryChanged;
 
     static bool              privateField(const SP<CTextInputV3>& input) {
         if (!input)
@@ -1005,9 +1009,52 @@ namespace EnzuiAdmission {
         return nullptr;
     }
 
+    static void trackWritingPrimary() {
+        writingPrimaryChanged = g_pSeatManager->m_events.setPrimarySelection.listen([] {
+            writingPrimarySurface.reset();
+            writingPrimaryInput.reset();
+            const auto source  = g_pSeatManager->m_selection.currentPrimarySelection.lock();
+            const auto surface = Desktop::focusState()->surface();
+            if (!g_pInputManager || !surface || !dynamic_cast<CPrimarySelectionSource*>(source.get()) || primaryOwner(source) != surface->client())
+                return;
+            const auto field = g_pInputManager->m_relay.getFocusedTextInput();
+            if (!field)
+                return;
+            writingPrimarySurface = surface;
+            writingPrimaryInput   = field->writingInput();
+        });
+    }
+
     static std::optional<CBox> cursorBox(const SP<CTextInputV3>& input) {
         const auto& box = input->m_current.box;
         return box.updated ? std::optional<CBox>{box.cursorBox} : std::nullopt;
+    }
+
+    static std::optional<std::string> writingText(std::string_view encoded, size_t limit) {
+        if (encoded.empty() || encoded.size() % 2 || encoded.size() > limit * 2)
+            return std::nullopt;
+        std::string text;
+        text.reserve(encoded.size() / 2);
+        for (size_t i = 0; i < encoded.size(); i += 2) {
+            unsigned int byte   = 0;
+            const auto   end    = encoded.data() + i + 2;
+            const auto   parsed = std::from_chars(end - 2, end, byte, 16);
+            if (parsed.ec != std::errc{} || parsed.ptr != end || byte == 0)
+                return std::nullopt;
+            text += sc<char>(byte);
+        }
+        return text;
+    }
+
+    static std::optional<size_t> primaryAnchorAtCursor(std::string_view surrounding, size_t cursor, std::string_view primary) {
+        if (cursor > surrounding.size())
+            return std::nullopt;
+        // GTK can publish PRIMARY while text-input still reports equal cursor and anchor offsets.
+        const bool before = surrounding.substr(0, cursor).ends_with(primary);
+        const bool after  = surrounding.substr(cursor).starts_with(primary);
+        if (before == after)
+            return std::nullopt;
+        return before ? cursor - primary.size() : cursor + primary.size();
     }
 
     static std::string writingCommand(std::string_view action, std::string_view args) {
@@ -1018,6 +1065,7 @@ namespace EnzuiAdmission {
         const auto surface = Desktop::focusState()->surface();
         const auto field   = g_pInputManager->m_relay.getFocusedTextInput();
         const auto input   = field ? field->writingInput() : SP<CTextInputV3>{};
+        const auto primary = g_pSeatManager->m_selection.currentPrimarySelection.lock();
         if (action == "capture") {
             writingSelection = {};
             if (!surface || privateField(input))
@@ -1033,17 +1081,21 @@ namespace EnzuiAdmission {
                     return reply;
                 }
             }
-            const auto source = g_pSeatManager->m_selection.currentPrimarySelection.lock();
-            if (primaryOwner(source) != surface->client())
+            if (primaryOwner(primary) != surface->client())
                 return "empty";
             const auto token = ++writingToken;
-            writingSelection = {surface, {}, source, {}, {}, 0, 0, token};
+            writingSelection = {surface, {}, primary, {}, {}, 0, 0, token};
+            if (input && input == writingPrimaryInput.lock() && surface == writingPrimarySurface.lock() && input->m_current.contentType.updated) {
+                const auto& text = input->m_current.surrounding;
+                if (text.updated && text.cursor == text.anchor && text.text.size() <= WRITING_SELECTION_LIMIT && cursorBox(input))
+                    writingSelection = {surface, input, primary, text.text, cursorBox(input), text.cursor, text.anchor, token};
+            }
             return std::format("primary {}", token);
         }
 
         const auto split = args.find(' ');
         uint64_t   token = 0;
-        if (!number(std::string{args.substr(0, split)}, token) || token != writingSelection.token)
+        if (!number(std::string{args.substr(0, split)}, token) || !token || token != writingSelection.token)
             return "stale";
         if (action == "cancel") {
             writingSelection = {};
@@ -1053,10 +1105,23 @@ namespace EnzuiAdmission {
             writingSelection = {};
             return "stale";
         }
+        const auto& captured = writingSelection;
+        const auto  source   = captured.primary.lock();
         if (action == "verify-primary") {
-            const auto source = writingSelection.primary.lock();
-            writingSelection  = {};
-            return source && source == g_pSeatManager->m_selection.currentPrimarySelection.lock() ? "ok" : "stale";
+            if (!source || source != primary) {
+                writingSelection = {};
+                return "stale";
+            }
+            if (const auto selected = split == std::string_view::npos ? std::nullopt : writingText(args.substr(split + 1), WRITING_SELECTION_LIMIT); selected && input &&
+                input == captured.input.lock() && input->m_current.surrounding.updated && input->m_current.surrounding.text == captured.surrounding &&
+                input->m_current.surrounding.cursor == captured.cursor && input->m_current.surrounding.anchor == captured.anchor && cursorBox(input) == captured.cursorBox) {
+                if (auto anchor = primaryAnchorAtCursor(captured.surrounding, captured.cursor, *selected)) {
+                    writingSelection.primaryAnchor = anchor;
+                    return "editable";
+                }
+            }
+            writingSelection = {};
+            return "ok";
         }
         if (action != "replace" || split == std::string_view::npos)
             return "error: invalid writing request";
@@ -1064,26 +1129,15 @@ namespace EnzuiAdmission {
             return "pending";
         const auto  saved = std::exchange(writingSelection, {});
         const auto& text  = input->m_current.surrounding;
-        if (input != saved.input.lock() || text.cursor != saved.cursor || text.anchor != saved.anchor || text.text != saved.surrounding ||
-            (saved.cursorBox && saved.cursorBox != cursorBox(input)))
+        const bool  anchorMatches = text.anchor == saved.anchor || text.anchor == saved.primaryAnchor;
+        if (input != saved.input.lock() || text.cursor != saved.cursor || !anchorMatches || text.text != saved.surrounding ||
+            (saved.cursorBox && saved.cursorBox != cursorBox(input)) ||
+            (saved.cursor == saved.anchor && (!input->m_current.contentType.updated || !saved.primaryAnchor || !source || source != primary)))
             return "stale";
-        const auto encoded = args.substr(split + 1);
-        if (encoded.empty() || encoded.size() % 2 || encoded.size() > WRITING_RESULT_LIMIT * 2)
+        const auto replacement = writingText(args.substr(split + 1), WRITING_RESULT_LIMIT);
+        if (!replacement)
             return "error: invalid replacement";
-        std::string replacement;
-        replacement.reserve(encoded.size() / 2);
-        for (size_t i = 0; i < encoded.size(); i += 2) {
-            unsigned int byte   = 0;
-            const auto   end    = encoded.data() + i + 2;
-            const auto   parsed = std::from_chars(end - 2, end, byte, 16);
-            if (parsed.ec != std::errc{} || parsed.ptr != end || byte == 0)
-                return "error: invalid replacement";
-            replacement += sc<char>(byte);
-        }
-        // Text-input applies the pending commit to the confirmed selection at done.
-        input->commitString(replacement);
-        input->sendDone();
-        return "ok";
+        return field->commitText(*replacement, false) ? "ok" : "stale";
     }
 
     static std::string writing(const IPC::Socket1::SRequest& request) {
@@ -1383,6 +1437,7 @@ void enzuiRegisterAdmissionCommand() {
     if (!EnzuiAdmission::enforcing() || !IPC::Socket1::sock())
         return;
     (void)EnzuiAdmission::launcher();
+    EnzuiAdmission::trackWritingPrimary();
     IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
         .name    = "enzuiwriting",
         .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
