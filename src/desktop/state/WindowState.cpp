@@ -4,6 +4,7 @@
 #include "../view/window/Window.hpp"
 #include "../view/window/WindowFullscreenPolicy.hpp"
 #include "../view/window/WindowPresentation.hpp"
+#include "../../managers/fullscreen/FullscreenController.hpp"
 
 #include <algorithm>
 #include <ranges>
@@ -55,6 +56,20 @@ void CWindowState::moveToZ(PHLWINDOW w, bool top) {
     w->fullscreenPolicy().setAllowedOverFullscreen(top);
     w->updateFullscreenInputState();
     *w->presentation().alpha(View::WINDOW_ALPHA_FULLSCREEN) = w->isBlockedByFullscreen() ? 0.F : 1.F;
+
+    // Windows raised over a fullscreen or maximized window are drawn above it regardless of stacking order,
+    // so raising the fullscreen window itself must send them back under it.
+    if (top && w->m_workspace && Fullscreen::controller()->getFullscreenWindow(w->m_workspace, true) == w) {
+        for (auto const& other : m_windows) {
+            if (other == w || other->m_workspace != w->m_workspace || !other->fullscreenPolicy().allowedOverFullscreen())
+                continue;
+
+            other->fullscreenPolicy().setAllowedOverFullscreen(false);
+            other->updateFullscreenInputState();
+            *other->presentation().alpha(View::WINDOW_ALPHA_FULLSCREEN) = other->isBlockedByFullscreen() ? 0.F : 1.F;
+            g_pHyprRenderer->damageWindow(other);
+        }
+    }
 
     if (w == (top ? m_windows.back() : m_windows.front()))
         return;
