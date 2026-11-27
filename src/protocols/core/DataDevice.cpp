@@ -643,6 +643,13 @@ void CWLDataDeviceProtocol::onDndPointerFocus() {
     updateDrag();
 }
 
+static std::optional<Vector2D> dragSurfaceLocal(SP<CWLSurfaceResource> surface, const Vector2D& position) {
+    const auto view = Desktop::View::CWLSurface::fromResource(surface);
+    if (const auto box = view ? view->getSurfaceBoxGlobal() : std::nullopt)
+        return position - box->pos();
+    return std::nullopt;
+}
+
 void CWLDataDeviceProtocol::initiateDrag(WP<CWLDataSourceResource> currentSource, SP<CWLSurfaceResource> dragSurface, SP<CWLSurfaceResource> origin) {
 
     if (m_dnd.currentSource) {
@@ -701,43 +708,23 @@ void CWLDataDeviceProtocol::initiateDrag(WP<CWLDataSourceResource> currentSource
     });
 
     m_dnd.mouseMove = Event::bus()->m_events.input.mouse.move.listen([this](Vector2D pos, Event::SCallbackInfo&) {
-        if (m_dnd.focusedDevice && g_pSeatManager->m_state.dndPointerFocus) {
-            auto surf = Desktop::View::CWLSurface::fromResource(g_pSeatManager->m_state.dndPointerFocus.lock());
-
-            if (!surf)
-                return;
-
-            const auto box = surf->getSurfaceBoxGlobal();
-
-            if (!box.has_value())
-                return;
-
-            m_dnd.focusedDevice->sendMotion(Time::millis(Time::steadyNow()), pos - box->pos());
-            LOG(Log::DEBUG, "Drag motion {}", pos - box->pos());
+        if (m_dnd.focusedDevice && !m_dnd.touchPos) {
+            if (const auto local = dragSurfaceLocal(g_pSeatManager->m_state.dndPointerFocus.lock(), pos)) {
+                m_dnd.focusedDevice->sendMotion(Time::millis(Time::steadyNow()), *local);
+                LOG(Log::DEBUG, "Drag motion {}", *local);
+            }
         }
     });
 
     m_dnd.touchMove = Event::bus()->m_events.input.touch.motion.listen([this](ITouch::SMotionEvent e, Event::SCallbackInfo&) {
-        // Mirror the mouse drag path: the input layer (CInputManager::onTouchMove)
-        // refocuses dndPointerFocus from the global touch position; here we just
-        // send surface-local motion against the currently focused dnd surface.
-        if (m_dnd.focusedDevice && g_pSeatManager->m_state.dndPointerFocus) {
-            auto surf = Desktop::View::CWLSurface::fromResource(g_pSeatManager->m_state.dndPointerFocus.lock());
-
-            if (!surf)
-                return;
-
-            const auto box = surf->getSurfaceBoxGlobal();
-
-            if (!box.has_value())
-                return;
-
-            const auto POS = g_pInputManager->m_touchData.lastTouchPos;
-
-            m_dnd.touchPos = POS;
-
-            m_dnd.focusedDevice->sendMotion(e.timeMs, POS - box->pos());
-            LOG(Log::DEBUG, "Drag motion {}", POS - box->pos());
+        if (!m_dnd.touchPos)
+            return;
+        m_dnd.touchPos = g_pInputManager->m_touchData.lastTouchPos;
+        if (m_dnd.focusedDevice) {
+            if (const auto local = dragSurfaceLocal(g_pSeatManager->m_state.dndPointerFocus.lock(), *m_dnd.touchPos)) {
+                m_dnd.focusedDevice->sendMotion(e.timeMs, *local);
+                LOG(Log::DEBUG, "Drag motion {}", *local);
+            }
         }
     });
 
@@ -763,9 +750,13 @@ void CWLDataDeviceProtocol::updateDrag() {
     const auto surface = g_pSeatManager->m_state.dndPointerFocus.lock();
     if (!surface)
         return;
+    const auto position = m_dnd.touchPos.value_or(g_pInputManager->getMouseCoordsInternal());
+    const auto local    = dragSurfaceLocal(surface, position);
+    if (!local)
+        return;
     m_dnd.focusedDevice = dataDeviceForClient(surface->client());
     if (const auto device = m_dnd.focusedDevice.lock())
-        offerDragToSurface(device, m_dnd.currentSource.lock(), surface, surface->m_current.size / 2.F);
+        offerDragToSurface(device, m_dnd.currentSource.lock(), surface, *local);
 }
 
 uint32_t CWLDataDeviceProtocol::enterXDrag(SP<IDataSource> source, SP<CWLSurfaceResource> surface, const Vector2D& local) {
@@ -838,13 +829,8 @@ SP<CWLDataOfferResource> CWLDataDeviceProtocol::offerDragToSurface(SP<IDataDevic
         WL->sendData();
     device->sendEnter(wl_display_next_serial(g_pCompositor->m_wlDisplay), surface, local, offer);
 #ifndef NO_XWAYLAND
-    if (const auto x11 = device->getX11()) {
-        const auto view = Desktop::View::CWLSurface::fromResource(surface);
-        if (const auto box = view ? view->getSurfaceBoxGlobal() : std::nullopt; box) {
-            const auto point = m_dnd.touchPos.value_or(g_pInputManager->getMouseCoordsInternal());
-            x11->sendMotion(Time::millis(Time::steadyNow()), point - box->pos());
-        }
-    }
+    if (const auto x11 = device->getX11())
+        x11->sendMotion(Time::millis(Time::steadyNow()), local);
 #endif
     return offer->getWayland();
 }
