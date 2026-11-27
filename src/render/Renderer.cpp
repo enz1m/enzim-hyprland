@@ -196,7 +196,7 @@ IHyprRenderer::IHyprRenderer() {
 
             bool dirty = false;
             for (auto& w : m_renderUnfocused) {
-                if (!w) {
+                if (!w || !w->m_ruleApplicator->renderUnfocused().valueOrDefault()) {
                     dirty = true;
                     continue;
                 }
@@ -213,7 +213,7 @@ IHyprRenderer::IHyprRenderer() {
             }
 
             if (dirty)
-                std::erase_if(m_renderUnfocused, [](const auto& e) { return !e || !e->m_ruleApplicator->renderUnfocused().valueOr(false); });
+                std::erase_if(m_renderUnfocused, [](const auto& e) { return !e || !e->m_ruleApplicator->renderUnfocused().valueOrDefault(); });
 
             if (!m_renderUnfocused.empty())
                 m_renderUnfocusedTimer->updateTimeout(std::chrono::milliseconds(1000 / *PFPS));
